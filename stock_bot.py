@@ -14,7 +14,7 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
 # 配置 Gemini AI
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-pro')
+model = genai.GenerativeModel('gemini-1.5-flash')
 
 # 配置 Discord Bot
 intents = discord.Intents.default()
@@ -116,12 +116,20 @@ class StockAnalyzer:
 @bot.event
 async def on_ready():
     print(f'✅ Bot 已登录: {bot.user}')
-    print('纯文字模式就绪。尝试输入: !analyze TSLA')
+    # 打印可用模型列表以方便调试
+    try:
+        print("正在检查可用模型列表...")
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                print(f" - {m.name}")
+    except Exception as e:
+        print(f"⚠️ 无法列出模型: {e}")
+    print('纯文字模式就绪。尝试输入: !a TSLA')
 
-@bot.command(name='analyze', aliases=['stock', 'gp'])
+@bot.command(name='a', aliases=['analyze', 'stock', 'gp'])
 async def analyze(ctx, ticker: str):
     """
-    分析股票命令。用法: !analyze TSLA
+    分析股票命令。用法: !a TSLA
     """
     ticker = ticker.upper()
     
