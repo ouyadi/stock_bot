@@ -1,4 +1,4 @@
 discord.py
 yfinance
 pandas
-google-generativeai>=0.7.2
+google-genai

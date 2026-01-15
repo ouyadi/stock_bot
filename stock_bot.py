@@ -3,7 +3,7 @@ from discord.ext import commands
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import google.generativeai as genai
+from google import genai
 import os
 import asyncio
 
@@ -14,8 +14,8 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
 
 # 配置 Gemini AI
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-3-flash-preview')
+client = genai.Client(api_key=GEMINI_API_KEY)
+MODEL_ID = 'gemini-2.0-flash'
 
 # 配置 Discord Bot
 intents = discord.Intents.default()
@@ -136,7 +136,7 @@ class StockAnalyzer:
         
         try:
             loop = asyncio.get_running_loop()
-            response = await loop.run_in_executor(None, lambda: model.generate_content(prompt))
+            response = await loop.run_in_executor(None, lambda: client.models.generate_content(model=MODEL_ID, contents=prompt))
             return response.text
         except Exception as e:
             return f"AI 分析生成失败: {str(e)}"
@@ -148,9 +148,8 @@ async def on_ready():
     print(f'✅ Bot 已登录: {bot.user}')
     try:
         print("正在检查可用模型列表...")
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                print(f" - {m.name}")
+        for m in client.models.list():
+            print(f" - {m.name}")
     except Exception as e:
         print(f"⚠️ 无法列出模型: {e}")
     print('纯文字模式就绪。尝试输入: !a TSLA')
