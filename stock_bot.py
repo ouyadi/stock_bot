@@ -93,9 +93,10 @@ class StockAnalyzer:
     async def get_ai_analysis(ticker, fund, tech_data, news_data):
         """调用 LLM 生成更深度的自然语言报告"""
         latest = tech_data.iloc[-1]
-        
-        news_headlines = "\n".join([f"- {n['title']}" for n in news_data[:5]]) # 最多5条新闻
-        
+
+        # Safely extract news headlines, skipping items that might not have a 'title' key.
+        news_headlines = "\n".join([f"- {n['title']}" for n in news_data[:5] if 'title' in n])
+
         # 构建更强大的提示词 (Prompt)
         prompt = f"""
         你是一位专业的华尔街量化与宏观对冲基金经理。请根据以下综合数据，深度分析股票 {ticker} ({fund['name']})。
