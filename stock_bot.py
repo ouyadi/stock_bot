@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 import yfinance as yf
 import pandas as pd
+import numpy as np
 import google.generativeai as genai
 import os
 import asyncio
@@ -14,7 +15,7 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
 # 配置 Gemini AI
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-2.5-flash')
+model = genai.GenerativeModel('gemini-3-flash-preview')
 
 # 配置 Discord Bot
 intents = discord.Intents.default()
@@ -26,32 +27,37 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 class StockAnalyzer:
     @staticmethod
     def get_data(ticker_symbol):
-        """获取历史数据和基本面信息"""
+        """获取历史数据和更全面的基本面信息"""
         try:
             stock = yf.Ticker(ticker_symbol)
-            # 获取1年数据用于计算指标
             df = stock.history(period="1y")
             
             if df.empty:
-                return None, None
+                return None, None, None
 
             info = stock.info
             fundamentals = {
                 "name": info.get('longName', ticker_symbol),
                 "sector": info.get('sector', 'Unknown'),
-                "pe": info.get('trailingPE', 'N/A'),
-                "market_cap": info.get('marketCap', 'N/A'),
                 "price": info.get('currentPrice', df['Close'].iloc[-1]),
-                "currency": info.get('currency', 'USD')
+                "currency": info.get('currency', 'USD'),
+                "market_cap": info.get('marketCap', 'N/A'),
+                "pe": info.get('trailingPE', 'N/A'),
+                "pb": info.get('priceToBook', 'N/A'),
+                "eps": info.get('trailingEps', 'N/A'),
+                "roe": info.get('returnOnEquity', 'N/A'),
+                "debt_to_equity": info.get('debtToEquity', 'N/A'),
             }
-            return df, fundamentals
+            
+            news = stock.news
+            return df, fundamentals, news
         except Exception as e:
             print(f"Data Error: {e}")
-            return None, None
+            return None, None, None
 
     @staticmethod
     def calculate_indicators(df):
-        """计算技术指标 (用于喂给 AI)"""
+        """计算更多技术和量化指标"""
         df = df.copy()
         
         # 1. 移动平均线 (SMA)
@@ -70,38 +76,62 @@ class StockAnalyzer:
         df['BB_Std'] = df['Close'].rolling(window=20).std()
         df['BB_Upper'] = df['BB_Middle'] + (2 * df['BB_Std'])
         df['BB_Lower'] = df['BB_Middle'] - (2 * df['BB_Std'])
+        
+        # 4. MACD
+        exp1 = df['Close'].ewm(span=12, adjust=False).mean()
+        exp2 = df['Close'].ewm(span=26, adjust=False).mean()
+        df['MACD'] = exp1 - exp2
+        df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+
+        # 5. 波动率 (30日历史波动率)
+        df['Log_Ret'] = df['Close'].apply(lambda x: np.log(x)).diff()
+        df['Volatility'] = df['Log_Ret'].rolling(window=30).std() * np.sqrt(252) # 年化
 
         return df
 
     @staticmethod
-    async def get_ai_analysis(ticker, fund, tech_data):
-        """调用 LLM 生成自然语言报告"""
+    async def get_ai_analysis(ticker, fund, tech_data, news_data):
+        """调用 LLM 生成更深度的自然语言报告"""
         latest = tech_data.iloc[-1]
         
-        # 构建提示词 (Prompt)
-        prompt = f"""
-        你是一位专业的华尔街量化交易员。请根据以下数据分析股票 {ticker} ({fund['name']})。
+        news_headlines = "\n".join([f"- {n['title']}" for n in news_data[:5]]) # 最多5条新闻
         
+        # 构建更强大的提示词 (Prompt)
+        prompt = f"""
+        你是一位专业的华尔街量化与宏观对冲基金经理。请根据以下综合数据，深度分析股票 {ticker} ({fund['name']})。
+
         【基本面数据】
         - 行业: {fund['sector']}
         - 当前价格: {fund['price']} {fund['currency']}
-        - 市盈率 (P/E): {fund['pe']}
         - 市值: {fund['market_cap']}
-        
+        - 市盈率 (P/E): {fund['pe']}
+        - 市净率 (P/B): {fund['pb']}
+        - 每股收益 (EPS): {fund['eps']}
+        - 净资产收益率 (ROE): {fund['roe']}
+        - 负债权益比: {fund['debt_to_equity']}
+
+        【量化分析】
+        - 30日年化波动率: {latest['Volatility']:.2%} (越高代表价格变动越剧烈)
+
         【技术指标 (最新收盘)】
         - RSI (14): {latest['RSI']:.2f} (RSI>70超买, <30超卖)
         - 50日均线: {latest['SMA_50']:.2f}
         - 200日均线: {latest['SMA_200']:.2f}
+        - MACD: {latest['MACD']:.2f} (信号线: {latest['MACD_Signal']:.2f})
         - 布林带: 上轨 {latest['BB_Upper']:.2f}, 下轨 {latest['BB_Lower']:.2f}
-        - 趋势判断: 当前价格 {"高于" if latest['Close'] > latest['SMA_200'] else "低于"} 200日均线
-        
-        请生成一份简短、犀利的 Markdown 格式报告，包含以下部分：
-        1. **📊 市场情绪**：基于RSI和布林带位置，判断当前是贪婪还是恐慌。
-        2. **🏢 基本面概览**：简评估值水平。
-        3. **🎯 交易策略**：给出明确的操作建议（做多/做空/观望），并给出支撑位和阻力位的参考。
-        4. **⚠️ 风险提示**：简述潜在风险。
-        
-        请直接输出报告内容，不要包含寒暄。
+        - 长期趋势: 当前价格 {"高于" if latest['Close'] > latest['SMA_200'] else "低于"} 200日均线，呈{"上升" if latest['SMA_50'] > latest['SMA_200'] else "下降"}趋势。
+
+        【事件驱动 (近期新闻)】
+        {news_headlines if news_headlines else "- 暂无重要新闻"}
+
+        请生成一份专业、深刻的 Markdown 格式投资分析报告，包含以下部分：
+        1. **📈 综合评估与核心观点**: 结合基本面、技术面、量化指标和新闻，给出核心投资逻辑。
+        2. **🏢 基本面健康度**: 评估公司财务状况、估值是否合理，有无增长潜力。
+        3. **📉 量化与技术面分析**: 结合波动率、RSI、MACD和均线，判断市场情绪和趋势，给出关键技术位。
+        4. **📰 事件驱动因素**: 分析近期新闻可能对股价造成的影响。
+        5. **🎯 交易策略与风险**: 给出明确的操作建议（长线持有/波段做多/保持观望/逢高做空），并阐述主要风险点。
+
+        请直接输出报告内容，展现你的专业性。
         """
         
         try:
@@ -116,7 +146,6 @@ class StockAnalyzer:
 @bot.event
 async def on_ready():
     print(f'✅ Bot 已登录: {bot.user}')
-    # 打印可用模型列表以方便调试
     try:
         print("正在检查可用模型列表...")
         for m in genai.list_models():
@@ -133,43 +162,50 @@ async def analyze(ctx, ticker: str):
     """
     ticker = ticker.upper()
     
-    # 1. 发送简单的加载状态
-    status_msg = await ctx.send(f"🔍 正在分析 **{ticker}** 的基本面与技术面数据...")
+    status_msg = await ctx.send(f"🔍 正在分析 **{ticker}**，请稍候...")
     
-    # 2. 获取数据
-    df, fund = StockAnalyzer.get_data(ticker)
-    
-    if df is None:
-        await status_msg.edit(content=f"❌ 找不到股票代码 **{ticker}**，请检查拼写。")
-        return
-
     try:
-        # 3. 计算指标 (虽然不画图，但AI需要这些数字)
+        # 1. 获取数据
+        await status_msg.edit(content=f"🧠 正在获取 **{ticker}** 的基本面、新闻和历史数据...")
+        df, fund, news = StockAnalyzer.get_data(ticker)
+        
+        if df is None:
+            await status_msg.edit(content=f"❌ 找不到股票代码 **{ticker}**，请检查拼写或重试。")
+            return
+
+        # 2. 计算指标
+        await status_msg.edit(content=f"📈 正在计算 **{ticker}** 的技术指标与量化信号...")
         df_tech = StockAnalyzer.calculate_indicators(df)
         
-        # 4. 获取 AI 报告
-        report = await StockAnalyzer.get_ai_analysis(ticker, fund, df_tech)
+        # 3. 获取 AI 报告
+        await status_msg.edit(content=f"🤖 Gemini AI 正在生成深度分析报告...")
+        report = await StockAnalyzer.get_ai_analysis(ticker, fund, df_tech, news)
 
-        # 5. 构建 Embed 消息
+        # 4. 构建 Embed 消息
         embed = discord.Embed(
-            title=f"📑 {ticker} 投资分析报告",
+            title=f"📑 {ticker} 深度投资分析报告",
             description=report,
-            color=0x3498db # 蓝色
+            color=0x1a73e8 # Google Blue
         )
         
-        # 添加一些关键数据字段作为摘要
         latest = df_tech.iloc[-1]
         embed.add_field(name="当前价格", value=f"{fund['price']}", inline=True)
-        embed.add_field(name="RSI (14)", value=f"{latest['RSI']:.1f}", inline=True)
         embed.add_field(name="P/E 估值", value=f"{fund['pe']}", inline=True)
-        
-        embed.set_footer(text=f"分析对象: {fund['name']} | 由 Gemini AI 驱动")
+        embed.add_field(name="P/B 估值", value=f"{fund['pb']}", inline=True)
+        embed.add_field(name="RSI (14)", value=f"{latest['RSI']:.1f}", inline=True)
+        embed.add_field(name="波动率", value=f"{latest['Volatility']:.2%}", inline=True)
+        embed.add_field(name="趋势 (50/200)", value=f'{"金叉" if latest["SMA_50"] > latest["SMA_200"] else "死叉"}', inline=True)
 
-        # 6. 发送结果
+        embed.set_footer(text=f"分析对象: {fund['name']} | 由 Gemini AI 强力驱动")
+        embed.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/8569/8569731.png") # 一个中性的图表icon
+
+        # 5. 发送结果
         await status_msg.edit(content="", embed=embed)
 
     except Exception as e:
-        await status_msg.edit(content=f"❌ 处理过程中发生错误: {str(e)}")
+        error_message = f"❌ 处理 **{ticker}** 时发生严重错误: {str(e)}\n"
+        error_message += "这可能是由于数据源问题或内部计算错误。请稍后再试。"
+        await status_msg.edit(content=error_message)
 
 # 启动 Bot
 if __name__ == "__main__":
