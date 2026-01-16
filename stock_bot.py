@@ -6,6 +6,8 @@ import numpy as np
 from google import genai
 import os
 import asyncio
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
 
 # ================= 配置区域 =================
 # 建议使用环境变量，或者直接在此处填入 Key
@@ -21,6 +23,24 @@ MODEL_ID = 'gemini-2.0-flash'
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
+
+# ================= 健康检查模块 (用于部署) =================
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    """A simple handler for the health check server."""
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+def run_health_check_server():
+    """Runs a simple HTTP server for health checks in a background thread."""
+    port = int(os.getenv('PORT', 8000)) # Koyeb provides the port to listen on via the PORT env var
+    server_address = ('', port)
+    httpd = HTTPServer(server_address, HealthCheckHandler)
+    print(f"✅ Health check server running on port {port}...")
+    httpd.serve_forever()
 
 # ================= 核心逻辑模块 =================
 
@@ -212,4 +232,10 @@ if __name__ == "__main__":
     if not DISCORD_TOKEN or not GEMINI_API_KEY:
         print("⚠️ 请设置 DISCORD_TOKEN 和 GEMINI_API_KEY 环境变量")
     else:
+        # Start the health check server in a background thread for deployment platforms
+        health_check_thread = threading.Thread(target=run_health_check_server)
+        health_check_thread.daemon = True  # Allows main thread to exit even if this thread is running
+        health_check_thread.start()
+
+        # Start the bot
         bot.run(DISCORD_TOKEN)
