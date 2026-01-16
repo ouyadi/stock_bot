@@ -17,7 +17,7 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
 # 配置 Gemini AI
 client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL_ID = 'gemini-2.0-flash'
+MODEL_ID = 'gemma-3-27b'
 
 # 配置 Discord Bot
 intents = discord.Intents.default()
