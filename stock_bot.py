@@ -3,21 +3,22 @@ from discord.ext import commands
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from openai import OpenAI
+from google import genai
 import os
 import asyncio
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
+import socket
 
 # ================= 配置区域 =================
 # 建议使用环境变量，或者直接在此处填入 Key
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
-DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
 
-# 配置 DeepSeek AI
-client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
-MODEL_ID = 'deepseek-chat'
+# 配置 Gemini AI
+client = genai.Client(api_key=GEMINI_API_KEY)
+MODEL_ID = 'gemini-2.0-flash'
 
 # 配置 Discord Bot
 intents = discord.Intents.default()
@@ -157,15 +158,8 @@ class StockAnalyzer:
         
         try:
             loop = asyncio.get_running_loop()
-            def call_deepseek():
-                response = client.chat.completions.create(
-                    model=MODEL_ID,
-                    messages=[{"role": "user", "content": prompt}],
-                    stream=False
-                )
-                return response.choices[0].message.content
-
-            return await loop.run_in_executor(None, call_deepseek)
+            response = await loop.run_in_executor(None, lambda: client.models.generate_content(model=MODEL_ID, contents=prompt))
+            return response.text
         except Exception as e:
             return f"AI 分析生成失败: {str(e)}"
 
@@ -174,7 +168,7 @@ class StockAnalyzer:
 @bot.event
 async def on_ready():
     print(f'✅ Bot 已登录: {bot.user}')
-    print('DeepSeek 模式就绪。尝试输入: !a TSLA')
+    print('Gemini 模式就绪。尝试输入: !a TSLA')
 
 @bot.command(name='a', aliases=['analyze', 'stock', 'gp'])
 async def analyze(ctx, ticker: str):
@@ -199,7 +193,7 @@ async def analyze(ctx, ticker: str):
         df_tech = StockAnalyzer.calculate_indicators(df)
         
         # 3. 获取 AI 报告
-        await status_msg.edit(content=f"🤖 DeepSeek AI 正在生成深度分析报告...")
+        await status_msg.edit(content=f"🤖 Gemini AI 正在生成深度分析报告...")
         report = await StockAnalyzer.get_ai_analysis(ticker, fund, df_tech, news)
 
         # 4. 构建 Embed 消息
@@ -217,7 +211,7 @@ async def analyze(ctx, ticker: str):
         embed.add_field(name="波动率", value=f"{latest['Volatility']:.2%}", inline=True)
         embed.add_field(name="趋势 (50/200)", value=f'{"金叉" if latest["SMA_50"] > latest["SMA_200"] else "死叉"}', inline=True)
 
-        embed.set_footer(text=f"分析对象: {fund['name']} | 由 DeepSeek AI 强力驱动")
+        embed.set_footer(text=f"分析对象: {fund['name']} | Host: {socket.gethostname()} | 由 Gemini AI 强力驱动")
         embed.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/8569/8569731.png") # 一个中性的图表icon
 
         # 5. 发送结果
@@ -230,8 +224,8 @@ async def analyze(ctx, ticker: str):
 
 # 启动 Bot
 if __name__ == "__main__":
-    if not DISCORD_TOKEN or not DEEPSEEK_API_KEY:
-        print("⚠️ 请设置 DISCORD_TOKEN 和 DEEPSEEK_API_KEY 环境变量")
+    if not DISCORD_TOKEN or not GEMINI_API_KEY:
+        print("⚠️ 请设置 DISCORD_TOKEN 和 GEMINI_API_KEY 环境变量")
     else:
         # Start the health check server in a background thread for deployment platforms
         health_check_thread = threading.Thread(target=run_health_check_server)
