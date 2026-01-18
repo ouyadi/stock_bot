@@ -598,7 +598,7 @@ class StockAnalyzer:
                     text = line.lstrip('#').strip()
                     # 使用 Regex 在数字编号(如 "1.")后添加不换行空格，增加间距
                     # 使用 \u00A0 防止被 format_content 破坏
-                    text = re.sub(r'^(\d+\.)\s*', r'\1\u00A0\u00A0', text)
+                    text = re.sub(r'^(\d+\.)\s*', lambda m: f"{m.group(1)}\u00A0\u00A0", text)
                     
                     # 格式化内容
                     text = format_content(text)
