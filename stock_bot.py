@@ -318,10 +318,19 @@ async def on_ready():
 @bot.command(name='a', aliases=['analyze', 'stock', 'gp'])
 async def analyze(ctx, ticker: str):
     """
-    分析股票命令。用法: !a TSLA
+    分析股票命令。用法: !a TSLA 或 !a 600519
     """
     ticker = ticker.upper()
     
+    # === A股代码自动后缀补全 ===
+    if ticker.isdigit() and len(ticker) == 6:
+        if ticker.startswith('6'):
+            ticker = f"{ticker}.SS" # 上海证券交易所
+        elif ticker.startswith(('0', '3')):
+            ticker = f"{ticker}.SZ" # 深圳证券交易所
+        elif ticker.startswith(('4', '8')):
+            ticker = f"{ticker}.BJ" # 北京证券交易所
+
     status_msg = await ctx.send(f"🔍 正在分析 **{ticker}**，请稍候...")
     
     try:
