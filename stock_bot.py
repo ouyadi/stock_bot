@@ -18,7 +18,8 @@ from reportlab.lib.pagesizes import letter
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib import colors
 
 # ================= 配置区域 =================
 # 建议使用环境变量，或者直接在此处填入 Key
@@ -372,36 +373,63 @@ class StockAnalyzer:
         """生成 PDF 报告"""
         try:
             buffer = io.BytesIO()
-            doc = SimpleDocTemplate(buffer, pagesize=letter)
+            # 调整页边距，增加内容容纳空间
+            doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=50, leftMargin=50, topMargin=50, bottomMargin=50)
             styles = getSampleStyleSheet()
             
             # 注册中文字体 (STSong-Light 是 Adobe 预定义的简体中文字体，无需额外字体文件)
             pdfmetrics.registerFont(UnicodeCIDFont('STSong-Light'))
             
-            # 自定义样式
+            # === 自定义样式优化 ===
             title_style = ParagraphStyle(
-                'Title', parent=styles['Title'], fontName='STSong-Light', fontSize=18, spaceAfter=12
+                'CustomTitle', parent=styles['Title'], fontName='STSong-Light', fontSize=22, leading=26, spaceAfter=20, alignment=1, textColor=colors.HexColor("#1a73e8")
             )
             heading_style = ParagraphStyle(
-                'Heading', parent=styles['Heading2'], fontName='STSong-Light', fontSize=14, spaceBefore=10, spaceAfter=6
+                'CustomHeading', parent=styles['Heading2'], fontName='STSong-Light', fontSize=14, leading=18, spaceBefore=12, spaceAfter=8, textColor=colors.HexColor("#202124")
             )
             normal_style = ParagraphStyle(
-                'Normal', parent=styles['Normal'], fontName='STSong-Light', fontSize=10, leading=14, spaceAfter=6
+                'CustomNormal', parent=styles['Normal'], fontName='STSong-Light', fontSize=10.5, leading=15, spaceAfter=6, textColor=colors.HexColor("#3c4043")
+            )
+            bullet_style = ParagraphStyle(
+                'CustomBullet', parent=normal_style, leftIndent=15, firstLineIndent=0, spaceAfter=4
             )
             
             story = []
+            
+            # 1. 报告标题
             story.append(Paragraph(f"{ticker} 深度投资分析报告", title_style))
             
-            # 基本信息
-            info = f"""
-            <b>标的:</b> {fund_data.get('name', ticker)} ({ticker})<br/>
-            <b>价格:</b> {fund_data.get('price', 'N/A')} {fund_data.get('currency', '')}<br/>
-            <b>日期:</b> {datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}
-            """
-            story.append(Paragraph(info, normal_style))
-            story.append(Spacer(1, 12))
+            # 2. 核心数据表格 (比纯文本更美观)
+            def fmt_num(n):
+                if isinstance(n, (int, float)):
+                    if n > 1e12: return f"{n/1e12:.2f}T"
+                    if n > 1e9: return f"{n/1e9:.2f}B"
+                    return f"{n:,.2f}"
+                return str(n)
+
+            data = [
+                ['标的名称', f"{fund_data.get('name', ticker)}", '当前价格', f"{fund_data.get('price', 'N/A')} {fund_data.get('currency', '')}"],
+                ['所属行业', fund_data.get('sector', 'Unknown'), '生成日期', datetime.datetime.now().strftime("%Y-%m-%d")],
+                ['P/E (TTM)', str(fund_data.get('pe', 'N/A')), 'P/B', str(fund_data.get('pb', 'N/A'))],
+                ['ROE', str(fund_data.get('roe', 'N/A')), '市值', fmt_num(fund_data.get('market_cap', 'N/A'))]
+            ]
             
-            # 解析 Markdown 文本并转换为 PDF 元素
+            t = Table(data, colWidths=[70, 180, 70, 120])
+            t.setStyle(TableStyle([
+                ('FONTNAME', (0, 0), (-1, -1), 'STSong-Light'),
+                ('FONTSIZE', (0, 0), (-1, -1), 10),
+                ('TEXTCOLOR', (0, 0), (-1, -1), colors.HexColor("#3c4043")),
+                ('BACKGROUND', (0, 0), (0, -1), colors.HexColor("#f1f3f4")), # 标签列背景色
+                ('BACKGROUND', (2, 0), (2, -1), colors.HexColor("#f1f3f4")),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#e0e0e0")), # 网格线
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                ('PADDING', (0, 0), (-1, -1), 6),
+            ]))
+            story.append(t)
+            story.append(Spacer(1, 20))
+            
+            # 3. 解析 Markdown 文本并转换为 PDF 元素
             lines = report_text.split('\n')
             for line in lines:
                 line = line.strip()
@@ -409,6 +437,8 @@ class StockAnalyzer:
                 
                 # 简单 Markdown 转换: 加粗
                 line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line)
+                # 处理代码块标记 (移除)
+                line = line.replace('```', '')
                 
                 if line.startswith('###'):
                     story.append(Paragraph(line.replace('###', '').strip(), heading_style))
@@ -416,10 +446,21 @@ class StockAnalyzer:
                     story.append(Paragraph(line.replace('##', '').strip(), heading_style))
                 elif line.startswith('#'):
                     story.append(Paragraph(line.replace('#', '').strip(), title_style))
+                elif line.startswith('- '):
+                    # 列表项优化
+                    story.append(Paragraph(f"• {line[2:]}", bullet_style))
                 else:
                     story.append(Paragraph(line, normal_style))
             
-            doc.build(story)
+            # 添加页脚
+            def add_footer(canvas, doc):
+                canvas.saveState()
+                canvas.setFont('STSong-Light', 9)
+                canvas.setFillColor(colors.grey)
+                canvas.drawCentredString(letter[0]/2.0, 30, "Generated by DeepSeek AI Stock Bot | Not Financial Advice")
+                canvas.restoreState()
+
+            doc.build(story, onFirstPage=add_footer, onLaterPages=add_footer)
             buffer.seek(0)
             return buffer
         except Exception as e:
