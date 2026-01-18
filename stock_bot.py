@@ -36,10 +36,11 @@ import base64
 from lxml import html as lxml_html
 import PyPDF2
 try:
-    from PIL import Image as PILImage
+    from PIL import Image as PILImage, ImageEnhance
     import pytesseract
 except ImportError:
     PILImage = None
+    ImageEnhance = None
     pytesseract = None
 
 # ================= 配置区域 =================
@@ -222,6 +223,7 @@ async def handle_email_report(request: Request):
     attachments_list = []
     for key, value in form.multi_items():
         if isinstance(value, UploadFile):
+            print(f"📂 收到附件: {value.filename} (Content-Type: {value.content_type})")
             try:
                 content = await value.read()
                 if content:
@@ -292,7 +294,13 @@ async def handle_email_report(request: Request):
                 print(f"PDF reading error ({pdf.file_name}): {e}")
 
         # --- 处理图片附件 ---
-        image_attachments = [a for a in payload.attachments if "image" in a.content_type]
+        image_attachments = []
+        for a in payload.attachments:
+            # 增强判断：如果 Content-Type 丢失或为 octet-stream，尝试通过后缀名识别
+            if "image" in a.content_type.lower() or \
+               any(a.file_name.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp', '.heic']):
+                image_attachments.append(a)
+
         for img in image_attachments:
             if PILImage and pytesseract:
                 try:
@@ -300,11 +308,29 @@ async def handle_email_report(request: Request):
                     img_content = base64.b64decode(img.content)
                     image = PILImage.open(io.BytesIO(img_content))
                     
+                    # === OCR 预处理优化 ===
+                    # 1. 转为灰度图 (消除色彩干扰)
+                    image = image.convert('L')
+                    
+                    # 2. 增强对比度 (让文字更清晰)
+                    if ImageEnhance:
+                        enhancer = ImageEnhance.Contrast(image)
+                        image = enhancer.enhance(2.0) # 提高对比度
+
+                    # 3. 放大图片 (Tesseract 对小字号识别较差，放大有助于识别)
+                    width, height = image.size
+                    if width < 1000:
+                        image = image.resize((width * 2, height * 2), PILImage.Resampling.LANCZOS)
+
+                    # === Tesseract 配置 ===
+                    # --psm 6: 假设是一个统一的文本块。这对表格特别有效，因为它会按行读取，而不是试图分栏。
+                    custom_config = r'--oem 3 --psm 6'
+
                     # 尝试识别中文和英文，如果失败则回退到默认语言
                     try:
-                        text = pytesseract.image_to_string(image, lang='chi_sim+eng')
+                        text = pytesseract.image_to_string(image, lang='chi_sim+eng', config=custom_config)
                     except Exception:
-                        text = pytesseract.image_to_string(image)
+                        text = pytesseract.image_to_string(image, config=custom_config)
                     
                     if text.strip():
                         parts.append(f"=== 图片附件 ({img.file_name}) OCR内容 ===\n{text}")
