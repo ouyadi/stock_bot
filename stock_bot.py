@@ -9,7 +9,7 @@ import asyncio
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 import socket
-from ddgs import DDGS
+from duckduckgo_search import DDGS
 from scipy.stats import norm
 import datetime
 import io
@@ -27,12 +27,20 @@ import matplotlib.pyplot as plt
 import json
 import time
 from supabase import create_client, Client
+import uvicorn
+from fastapi import FastAPI, Form, File, UploadFile, HTTPException, Body
+from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field
+import base64
+from lxml import html as lxml_html
+import PyPDF2
 
 # ================= 配置区域 =================
 # 建议使用环境变量，或者直接在此处填入 Key
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
 DISCORD_AI_REPORT_CHANNEL_ID = os.getenv('DISCORD_AI_REPORT_CHANNEL_ID') # 指定频道 ID
+INSTITUTION_REPORT_CHANNEL_ID = '1434770162573250560' # 投研机构带飞频道
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 SUPABASE_BUCKET = os.getenv('SUPABASE_BUCKET', 'reports') # 默认 bucket 名为 reports
@@ -52,76 +60,207 @@ supabase: Client = None
 if SUPABASE_URL and SUPABASE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ================= 健康检查模块 (用于部署) =================
+# 配置 FastAPI
+app = FastAPI()
 
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    """A simple handler for the health check server."""
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(b"OK")
+# ================= 投研报告处理模块 =================
 
-    def do_OPTIONS(self):
-        """Handle CORS preflight requests."""
-        self.send_response(200)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
-        self.end_headers()
+class ResearchAnalyzer:
+    @staticmethod
+    async def summarize_content(content: str, subject: str) -> str:
+        """使用 DeepSeek API 对投研报告内容进行总结"""
+        prompt = f"""
+        # Role
+        你是一名顶尖的金融分析师，你的任务是阅读并总结一份来自投研机构的电子邮件报告。
 
-    def do_POST(self):
-        """Handle analysis requests from web service."""
-        if self.path == '/analyze':
-            try:
-                content_length = int(self.headers['Content-Length'])
-                post_data = self.rfile.read(content_length)
-                data = json.loads(post_data)
-                ticker = data.get('ticker')
+        # Input Data
+        - **邮件主题**: {subject}
+        - **报告内容**:
+        ---
+        {content[:15000]} 
+        ---
 
-                if not ticker:
-                    self.send_response(400)
-                    self.end_headers()
-                    self.wfile.write(b"Missing ticker")
-                    return
+        # Task
+        请根据报告内容，生成一份精炼、专业的摘要。摘要应包含以下几点：
+        1.  **核心观点 (Core Thesis)**: 报告最关键的结论是什么？(例如: 看多/看空某资产、市场趋势预测等)
+        2.  **关键论据 (Key Arguments)**: 支撑核心观点的三到五个最重要的数据、事件或逻辑是什么？
+        3.  **潜在风险 (Potential Risks)**: 报告中提及了哪些可能导致结论失效的风险因素？
+        4.  **目标价与评级 (Target & Rating)**: 如果报告中明确给出了目标价或投资评级(如买入/持有/卖出)，请明确指出。
 
-                print(f"🌐 Web Request: Analyzing {ticker}...")
-                
-                # 执行全流程分析
-                pdf_buffer, report_text = StockAnalyzer.run_full_analysis_pipeline(ticker)
-                
-                if not pdf_buffer:
-                    self.send_response(500)
-                    self.end_headers()
-                    self.wfile.write(b"Analysis failed")
-                    return
+        请使用中文撰写，语言风格要专业、客观、条理清晰。
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: client.chat.completions.create(
+                    model=MODEL_ID,
+                    messages=[{"role": "user", "content": prompt}],
+                    stream=False
+                )
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            print(f"DeepSeek Error: {e}")
+            return f"AI 摘要生成失败: {e}"
 
-                # 上传到 Supabase
-                public_url = StockAnalyzer.upload_to_supabase(ticker, pdf_buffer)
-                
-                self.send_response(200)
-                self.send_header('Content-type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*') # 允许跨域
-                self.end_headers()
-                response = {"ticker": ticker, "pdf_url": public_url, "report": report_text, "status": "success"}
-                self.wfile.write(json.dumps(response).encode())
+    @staticmethod
+    def create_summary_pdf(summary_text: str, subject: str) -> io.BytesIO:
+        """将 AI 生成的摘要转换为 PDF"""
+        try:
+            buffer = io.BytesIO()
+            doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=72, leftMargin=72, topMargin=72, bottomMargin=72)
+            styles = getSampleStyleSheet()
+            pdfmetrics.registerFont(UnicodeCIDFont('STSong-Light'))
 
-            except Exception as e:
-                print(f"Web Handler Error: {e}")
-                self.send_error(500, str(e))
+            title_style = ParagraphStyle('Title', fontName='STSong-Light', fontSize=18, alignment=1, spaceAfter=20, textColor=colors.navy)
+            normal_style = ParagraphStyle('Normal', fontName='STSong-Light', fontSize=11, leading=14, spaceAfter=6)
+            
+            story = []
+            story.append(Paragraph(f"投研报告摘要: {subject}", title_style))
+            
+            # 简单的 Markdown 解析
+            for line in summary_text.split('\n'):
+                line = line.strip()
+                if line.startswith('#'):
+                    story.append(Paragraph(line.lstrip('#').strip(), ParagraphStyle('h2', parent=normal_style, fontSize=14, spaceBefore=10)))
+                elif line.startswith('- ') or line.startswith('* '):
+                    story.append(Paragraph(f"• {line[2:]}", normal_style, leftIndent=10))
+                elif line:
+                    story.append(Paragraph(line, normal_style))
+
+            doc.build(story)
+            buffer.seek(0)
+            return buffer
+        except Exception as e:
+            print(f"PDF Creation Error: {e}")
+            return None
+
+    @staticmethod
+    async def send_discord_notification(summary: str, subject: str, pdf_url: str):
+        """发送通知到指定的 Discord 频道"""
+        channel_id = int(INSTITUTION_REPORT_CHANNEL_ID) # 投研机构带飞频道
+        channel = bot.get_channel(channel_id)
+        if not channel:
+            print(f"错误: 找不到频道 ID {channel_id}")
+            return
+
+        embed = discord.Embed(
+            title=f"📬 新投研报告摘要: {subject}",
+            description=summary,
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="下载完整 PDF 报告", value=f"[点击这里]({pdf_url})", inline=False)
+        embed.set_footer(text="由 CloudMailIn -> DeepSeek -> Supabase 驱动")
+        
+        await channel.send(embed=embed)
+
+
+# 定义 CloudMailIn 的数据模型
+class CloudmailinAttachment(BaseModel):
+    file_name: str
+    content_type: str
+    content: str  # Base64 encoded content
+    size: int
+
+class CloudmailinPayload(BaseModel):
+    plain: Optional[str] = None
+    html: Optional[str] = None
+    subject: Optional[str] = "无主题"
+    attachments: List[CloudmailinAttachment] = []
+
+@app.post("/email-report")
+async def handle_email_report(payload: CloudmailinPayload):
+    """
+    接收来自 CloudMailIn 的邮件 POST 请求，进行处理和转发。
+    """
+    print("📧 收到来自 CloudMailIn 的新邮件...")
+    analysis_content = ""
+    source = ""
+
+    # 1. 提取内容 (PDF > 图片 > HTML > Plain Text)
+    pdf_attachments = [a for a in payload.attachments if "pdf" in a.content_type]
+    image_attachments = [a for a in payload.attachments if "image" in a.content_type]
+
+    try:
+        if pdf_attachments:
+            source = f"PDF附件: {pdf_attachments[0].file_name}"
+            print(f"📄 发现 PDF 附件: {source}")
+            pdf_content = base64.b64decode(pdf_attachments[0].content)
+            pdf_reader = PyPDF2.PdfReader(io.BytesIO(pdf_content))
+            for page in pdf_reader.pages:
+                analysis_content += page.extract_text() or ""
+        
+        elif image_attachments:
+            # 当前模型不支持直接图片内容分析，所以只记录信息
+            source = f"图片附件: {[a.file_name for a in image_attachments]}"
+            print(f"🖼️ 发现图片附件 (暂不分析内容): {source}")
+            analysis_content = "邮件包含图片附件，请在原文中查看。"
+            # 未来可以集成图片识别模型
+            # for attachment in image_attachments:
+            #   image_data = base64.b64decode(attachment.content)
+            #   analysis_content += await image_to_text_model(image_data)
+
+        elif payload.html:
+            source = "邮件正文 (HTML)"
+            print("📝 使用 HTML 邮件正文")
+            # 使用 lxml 清理 HTML 标签
+            doc = lxml_html.fromstring(payload.html)
+            # 移除脚本和样式
+            for bad in doc.xpath("//script | //style"):
+                bad.getparent().remove(bad)
+            analysis_content = doc.text_content()
+        
+        elif payload.plain:
+            source = "邮件正文 (纯文本)"
+            print("📄 使用纯文本邮件正文")
+            analysis_content = payload.plain
+        
         else:
-            self.send_error(404)
+            raise HTTPException(status_code=400, detail="邮件内容为空")
 
-def run_health_check_server():
-    """Runs a simple HTTP server for health checks in a background thread."""
-    port = int(os.getenv('PORT', 8000)) # Koyeb provides the port to listen on via the PORT env var
-    server_address = ('', port)
-    httpd = HTTPServer(server_address, HealthCheckHandler)
-    print(f"✅ Health check server running on port {port}...")
-    httpd.serve_forever()
+        # 2. 调用 AI 进行总结
+        print("🤖 正在发送内容到 DeepSeek 进行总结...")
+        if not analysis_content.strip():
+             summary_text = "报告内容为空或无法解析。"
+        else:
+             summary_text = await ResearchAnalyzer.summarize_content(analysis_content, payload.subject)
 
-# ================= 核心逻辑模块 =================
+        # 3. 生成 PDF
+        print("📑 正在生成摘要 PDF...")
+        pdf_buffer = ResearchAnalyzer.create_summary_pdf(summary_text, payload.subject)
+        
+        if not pdf_buffer:
+            raise HTTPException(status_code=500, detail="无法生成 PDF")
 
+        # 4. 上传到 Supabase
+        print("☁️ 正在上传 PDF 到 Supabase...")
+        pdf_filename = f"report_summary_{int(time.time())}.pdf"
+        public_url = "Supabase not configured"
+        if supabase:
+            res = supabase.storage.from_(SUPABASE_BUCKET).upload(
+                file=pdf_buffer.getvalue(), 
+                path=pdf_filename, 
+                file_options={"content-type": "application/pdf"}
+            )
+            public_url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(pdf_filename)
+
+        # 5. 发送到 Discord
+        print("💬 正在发送通知到 Discord...")
+        await ResearchAnalyzer.send_discord_notification(summary_text, payload.subject, public_url)
+
+        print("✅ 投研报告处理流程完成!")
+        return {"status": "success", "source": source, "subject": payload.subject, "pdf_url": public_url}
+
+    except Exception as e:
+        print(f"处理邮件时发生严重错误: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/")
+def health_check():
+    return {"status": "ok", "bot_status": "logged_in" if bot.is_ready() else "connecting"}
+
+# ================= 核心逻辑模块 (保持不变) =================
 class StockAnalyzer:
     @staticmethod
     def run_full_analysis_pipeline(ticker):
@@ -130,9 +269,9 @@ class StockAnalyzer:
             ticker = ticker.upper()
             # A股后缀处理
             if ticker.isdigit() and len(ticker) == 6:
-                if ticker.startswith('6'): ticker = f"{ticker}.SS"
-                elif ticker.startswith(('0', '3')): ticker = f"{ticker}.SZ"
-                elif ticker.startswith(('4', '8')): ticker = f"{ticker}.BJ"
+                if ticker.startswith('6'): ticker = f"{ticker}.SS" # 上海证券交易所
+                elif ticker.startswith(('0', '3')): ticker = f"{ticker}.SZ" # 深圳证券交易所
+                elif ticker.startswith(('4', '8')): ticker = f"{ticker}.BJ" # 北京证券交易所
 
             # 1. 获取数据
             df, fund, news = StockAnalyzer.get_data(ticker)
@@ -775,10 +914,11 @@ class StockAnalyzer:
         # 格式化 GEX 数据
         gex_info = "- 暂无期权 Gamma 数据"
         if gex_data:
-            gex_info = f"""- 到期日: {gex_data['expiry']}
+            gex_info = f"""
+            - 到期日: {gex_data['expiry']}
             - Net GEX (净伽马敞口): ${gex_data['net_gex']:,.0f}
             - Call Wall (最大阻力/做市商做空点): {gex_data['call_wall']}
-            - Put Wall (最大支撑/做市商回补点): {gex_data['put_wall']}"""
+            - Put Wall (最大支撑/做市商回补点): {gex_data['put_wall']} """
 
         # 格式化资金流数据
         flow_info = "- 暂无显著期权异动"
@@ -876,7 +1016,6 @@ class StockAnalyzer:
             stream=False
         )
         return response.choices[0].message.content
-
     @staticmethod
     async def get_ai_analysis(ticker, fund, tech_data, news_data, web_search_data, gex_data, flow_data):
         """调用 LLM 生成更深度的自然语言报告 (Async Wrapper)"""
@@ -930,7 +1069,7 @@ async def analyze(ctx, ticker: str):
         df, fund, news = StockAnalyzer.get_data(ticker)
         
         if df is None:
-            await status_msg.edit(content=f"❌ 找不到股票代码 **{ticker}**，请检查拼写或重试。")
+            await status_msg.edit(content=f"❌ 找不到股票代码 **{ticker}**，请检查拼写或重试。)"
             return
 
         # 计算涨跌幅
@@ -1008,10 +1147,23 @@ if __name__ == "__main__":
     if not DISCORD_TOKEN or not DEEPSEEK_API_KEY:
         print("⚠️ 请设置 DISCORD_TOKEN 和 DEEPSEEK_API_KEY 环境变量")
     else:
-        # Start the health check server in a background thread for deployment platforms
-        health_check_thread = threading.Thread(target=run_health_check_server)
-        health_check_thread.daemon = True  # Allows main thread to exit even if this thread is running
-        health_check_thread.start()
+        # 使用 asyncio 同时运行 discord bot 和 fastapi server
+        async def main():
+            # 启动 discord bot 作为后台任务
+            bot_task = asyncio.create_task(bot.start(DISCORD_TOKEN))
+            
+            # 配置 uvicorn
+            port = int(os.getenv('PORT', 8000))
+            config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
+            server = uvicorn.Server(config)
+            
+            # 启动 fastapi server
+            server_task = asyncio.create_task(server.serve())
+            
+            # 等待两个任务完成
+            await asyncio.gather(
+                bot_task,
+                server_task
+            )
 
-        # Start the bot
-        bot.run(DISCORD_TOKEN)
+        asyncio.run(main())
