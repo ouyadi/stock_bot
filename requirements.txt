@@ -2,7 +2,7 @@ discord.py
 yfinance
 pandas
 openai
-duckduckgo-search
+ddgs
 scipy
 reportlab
 matplotlib
