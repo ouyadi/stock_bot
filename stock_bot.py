@@ -504,8 +504,8 @@ class StockAnalyzer:
                 ('FONTSIZE', (0, 1), (-1, 1), 8),  # 第二行标签小字
                 ('TEXTCOLOR', (0, 1), (-1, 1), colors.grey),
                 ('TEXTCOLOR', (2, 0), (2, 0), change_color), # 涨跌幅颜色
-                ('BOTTOMPADDING', (0, 0), (-1, 0), 0),
-                ('TOPPADDING', (0, 1), (-1, 1), 0),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 6),
+                ('TOPPADDING', (0, 1), (-1, 1), 4),
                 ('BOX', (0, 0), (-1, -1), 1, colors.HexColor("#e0e0e0")),
                 ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor("#f8f9fa")),
             ]))
