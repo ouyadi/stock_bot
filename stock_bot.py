@@ -1069,7 +1069,7 @@ async def analyze(ctx, ticker: str):
         df, fund, news = StockAnalyzer.get_data(ticker)
         
         if df is None:
-            await status_msg.edit(content=f"❌ 找不到股票代码 **{ticker}**，请检查拼写或重试。)"
+            await status_msg.edit(content=f"❌ 找不到股票代码 **{ticker}**，请检查拼写或重试。")
             return
 
         # 计算涨跌幅
