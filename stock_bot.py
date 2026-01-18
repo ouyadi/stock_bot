@@ -205,6 +205,9 @@ async def handle_email_report(request: Request):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Form parsing error: {e}")
 
+    # Debug: 打印所有接收到的字段键名，帮助排查附件丢失问题
+    print(f"🔍 Form Keys: {list(form.keys())}")
+
     # 手动构建 Payload 对象
     plain = form.get("plain")
     html = form.get("html")
@@ -222,8 +225,9 @@ async def handle_email_report(request: Request):
     
     attachments_list = []
     for key, value in form.multi_items():
-        if isinstance(value, UploadFile):
-            print(f"📂 收到附件: {value.filename} (Content-Type: {value.content_type})")
+        # 宽松判断: 只要有 filename 属性且不为空，或者明确是 UploadFile
+        if isinstance(value, UploadFile) or (hasattr(value, "filename") and value.filename):
+            print(f"📂 收到附件: {value.filename} (Key: {key}, Content-Type: {value.content_type})")
             try:
                 content = await value.read()
                 if content:
@@ -236,6 +240,8 @@ async def handle_email_report(request: Request):
                     ))
             finally:
                 await value.close()
+        elif "attachment" in key:
+             print(f"⚠️ 发现疑似附件字段 '{key}' 但未被识别为文件对象 (Type: {type(value)})")
     
     payload = CloudmailinPayload(
         plain=str(plain) if plain else None,
