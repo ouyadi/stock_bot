@@ -5,3 +5,4 @@ openai
 duckduckgo-search
 scipy
 reportlab
+matplotlib

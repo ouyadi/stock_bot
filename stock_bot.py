@@ -18,9 +18,12 @@ from reportlab.lib.pagesizes import letter
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
 from reportlab.graphics.shapes import Drawing, Line
 from reportlab.lib import colors
+import matplotlib
+matplotlib.use('Agg') # 设置后端为 Agg，适用于无头服务器环境
+import matplotlib.pyplot as plt
 
 # ================= 配置区域 =================
 # 建议使用环境变量，或者直接在此处填入 Key
@@ -378,12 +381,75 @@ class StockAnalyzer:
             return []
 
     @staticmethod
-    def create_pdf_report(ticker, report_text, fund_data):
+    def get_option_open_interest_chart(stock, current_price):
+        """生成期权持仓量 (Open Interest) 分布图"""
+        try:
+            exps = stock.options
+            if not exps: return None
+            
+            # 使用最近的到期日
+            expiry = exps[0]
+            opt = stock.option_chain(expiry)
+            
+            calls = opt.calls
+            puts = opt.puts
+            
+            if calls.empty and puts.empty: return None
+            
+            # 筛选当前价格附近 +/- 15% 的行权价，避免图表过宽
+            lower_bound = current_price * 0.85
+            upper_bound = current_price * 1.15
+            
+            calls = calls[(calls['strike'] >= lower_bound) & (calls['strike'] <= upper_bound)]
+            puts = puts[(puts['strike'] >= lower_bound) & (puts['strike'] <= upper_bound)]
+            
+            if calls.empty and puts.empty: return None
+
+            # 绘图
+            plt.style.use('ggplot')
+            fig, ax = plt.subplots(figsize=(8, 3))
+            
+            # 提取数据
+            # 为了简化，我们只画出有数据的 Strike
+            all_strikes = sorted(list(set(calls['strike'].tolist() + puts['strike'].tolist())))
+            
+            call_oi = [calls[calls['strike'] == k]['openInterest'].sum() for k in all_strikes]
+            put_oi = [puts[puts['strike'] == k]['openInterest'].sum() for k in all_strikes]
+            
+            indices = np.arange(len(all_strikes))
+            width = 0.35
+            
+            ax.bar(indices - width/2, call_oi, width, label='Call OI', color='#2ca02c', alpha=0.8)
+            ax.bar(indices + width/2, put_oi, width, label='Put OI', color='#d62728', alpha=0.8)
+            
+            ax.set_xticks(indices)
+            ax.set_xticklabels([str(int(s)) for s in all_strikes], rotation=45, fontsize=7)
+            ax.set_title(f'Open Interest Distribution (Expiry: {expiry})', fontsize=10)
+            ax.legend(fontsize=8)
+            ax.grid(True, alpha=0.3)
+            
+            # 标记当前价格
+            curr_idx = np.interp(current_price, all_strikes, indices)
+            ax.axvline(x=curr_idx, color='blue', linestyle='--', alpha=0.6, label='Current Price')
+            
+            plt.tight_layout()
+            
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', dpi=100)
+            buf.seek(0)
+            plt.close(fig)
+            return buf
+        except Exception as e:
+            print(f"Chart Error: {e}")
+            return None
+
+    @staticmethod
+    def create_pdf_report(ticker, report_text, fund_data, tech_latest, price_change, oi_chart_buffer):
         """生成 PDF 报告"""
         try:
             buffer = io.BytesIO()
             # 调整页边距，增加内容容纳空间
-            doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=50, leftMargin=50, topMargin=50, bottomMargin=50)
+            doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
             styles = getSampleStyleSheet()
             
             # 注册中文字体 (STSong-Light 是 Adobe 预定义的简体中文字体，无需额外字体文件)
@@ -391,10 +457,10 @@ class StockAnalyzer:
             
             # === 自定义样式优化 ===
             title_style = ParagraphStyle(
-                'CustomTitle', parent=styles['Title'], fontName='STSong-Light', fontSize=22, leading=26, spaceAfter=20, alignment=1, textColor=colors.HexColor("#1a73e8")
+                'CustomTitle', parent=styles['Title'], fontName='STSong-Light', fontSize=24, leading=28, spaceAfter=10, alignment=1, textColor=colors.HexColor("#1a73e8")
             )
             heading_style = ParagraphStyle(
-                'CustomHeading', parent=styles['Heading2'], fontName='STSong-Light', fontSize=14, leading=18, spaceBefore=12, spaceAfter=8, textColor=colors.HexColor("#202124")
+                'CustomHeading', parent=styles['Heading2'], fontName='STSong-Light', fontSize=15, leading=18, spaceBefore=15, spaceAfter=8, textColor=colors.HexColor("#202124")
             )
             normal_style = ParagraphStyle(
                 'CustomNormal', parent=styles['Normal'], fontName='STSong-Light', fontSize=10.5, leading=15, spaceAfter=6, textColor=colors.HexColor("#3c4043")
@@ -410,40 +476,69 @@ class StockAnalyzer:
             
             # 1. 报告标题
             story.append(Paragraph(f"{ticker} 深度投资分析报告", title_style))
+            story.append(Paragraph(f"Generated by DeepSeek AI • {datetime.datetime.now().strftime('%Y-%m-%d')}", ParagraphStyle('SubTitle', parent=normal_style, alignment=1, textColor=colors.grey)))
+            story.append(Spacer(1, 15))
             
-            # 2. 核心数据表格 (比纯文本更美观)
+            # 2. 顶部仪表盘 (Dashboard)
             def fmt_num(n):
                 if isinstance(n, (int, float)):
                     if n > 1e12: return f"{n/1e12:.2f}T"
                     if n > 1e9: return f"{n/1e9:.2f}B"
                     return f"{n:,.2f}"
                 return str(n)
-
-            data = [
-                ['标的名称', f"{fund_data.get('name', ticker)}", '当前价格', f"{fund_data.get('price', 'N/A')} {fund_data.get('currency', '')}"],
-                ['所属行业', fund_data.get('sector', 'Unknown'), '生成日期', datetime.datetime.now().strftime("%Y-%m-%d")],
-                ['P/E (TTM)', str(fund_data.get('pe', 'N/A')), 'P/B', str(fund_data.get('pb', 'N/A'))],
-                ['ROE', str(fund_data.get('roe', 'N/A')), '市值', fmt_num(fund_data.get('market_cap', 'N/A'))]
-            ]
             
-            t = Table(data, colWidths=[70, 180, 70, 120])
+            # 涨跌幅颜色
+            change_color = colors.green if price_change >= 0 else colors.red
+            change_str = f"{price_change:+.2%}"
+
+            # 仪表盘数据
+            dash_data = [
+                [f"{ticker}", f"{fund_data.get('price', 'N/A')}", change_str, fmt_num(fund_data.get('market_cap', 'N/A'))],
+                ["TICKER", "PRICE", "24H CHANGE", "MARKET CAP"]
+            ]
+            dash_table = Table(dash_data, colWidths=[120, 120, 120, 120])
+            dash_table.setStyle(TableStyle([
+                ('FONTNAME', (0, 0), (-1, -1), 'STSong-Light'),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('FONTSIZE', (0, 0), (-1, 0), 16), # 第一行大字
+                ('FONTSIZE', (0, 1), (-1, 1), 8),  # 第二行标签小字
+                ('TEXTCOLOR', (0, 1), (-1, 1), colors.grey),
+                ('TEXTCOLOR', (2, 0), (2, 0), change_color), # 涨跌幅颜色
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 0),
+                ('TOPPADDING', (0, 1), (-1, 1), 0),
+                ('BOX', (0, 0), (-1, -1), 1, colors.HexColor("#e0e0e0")),
+                ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor("#f8f9fa")),
+            ]))
+            story.append(dash_table)
+            story.append(Spacer(1, 15))
+
+            # 3. 关键指标红绿灯 (Key Indicators)
+            # 逻辑: RSI < 30 (超卖/绿), > 70 (超买/红); P/E 仅展示
+            rsi_val = tech_latest.get('RSI', 50)
+            rsi_color = colors.green if rsi_val < 30 else (colors.red if rsi_val > 70 else colors.black)
+            
+            ind_data = [
+                ['P/E (TTM)', 'RSI (14)', 'Volatility', 'P/C Ratio'],
+                [str(fund_data.get('pe', 'N/A')), f"{rsi_val:.2f}", f"{tech_latest.get('Volatility', 0):.2%}", str(fund_data.get('pc_ratio_vol', 'N/A'))]
+            ]
+            t = Table(ind_data, colWidths=[120, 120, 120, 120])
             t.setStyle(TableStyle([
                 ('FONTNAME', (0, 0), (-1, -1), 'STSong-Light'),
-                ('FONTSIZE', (0, 0), (-1, -1), 10),
-                ('TEXTCOLOR', (0, 0), (-1, -1), colors.black), # 默认数值为黑色
-                ('TEXTCOLOR', (0, 0), (0, -1), colors.HexColor("#5f6368")), # 第一列标签灰色
-                ('TEXTCOLOR', (2, 0), (2, -1), colors.HexColor("#5f6368")), # 第三列标签灰色
-                ('BACKGROUND', (0, 0), (0, -1), colors.HexColor("#f1f3f4")), # 标签列背景色
-                ('BACKGROUND', (2, 0), (2, -1), colors.HexColor("#f1f3f4")),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#e0e0e0")), # 网格线
-                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-                ('PADDING', (0, 0), (-1, -1), 6),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#e8f0fe")), # 表头背景
+                ('TEXTCOLOR', (1, 1), (1, 1), rsi_color), # RSI 颜色
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#e0e0e0")),
             ]))
             story.append(t)
             story.append(Spacer(1, 20))
+
+            # 4. 插入期权 OI 图表
+            if oi_chart_buffer:
+                img = Image(oi_chart_buffer, width=480, height=180)
+                story.append(img)
+                story.append(Spacer(1, 20))
             
-            # 3. 解析 Markdown 文本并转换为 PDF 元素
+            # 5. 解析 Markdown 文本并转换为 PDF 元素
             lines = report_text.split('\n')
             for line in lines:
                 # 检测缩进 (用于判断嵌套列表)
@@ -592,17 +687,147 @@ class StockAnalyzer:
             # Analysis Requirements
             请基于以上数据，生成一份逻辑严密、具备实战指导意义的分析报告。要求：
 
-            ### 1. 🏛️ 宏观叙事与行业定性
-            分析当前宏观环境对该行业及公司的边际影响。判断标的处于周期的哪个阶段。
+            ### 1. 🏛️ 宏观叙事与基本面 (Macro & Fundamentals)
+            - **AI/FSD/增长故事**: 结合业务指引和行业趋势，分析核心增长逻辑。
+            - **估值逻辑**: P/E 是否合理？结合 PEG 和历史分位判断。
 
-            ### 2. 📊 因子深度分析
-            - **估值与预期**: 结合 P/E 和 Forward P/E，判断市场当前的预期是否过高或过低。
-            - **财务健康度 (10-Q)**: 结合最新财报数据，分析营收/利润增长趋势及现金流状况。
-            - **业务指引 (Guidance)**: 结合管理层在 10-Q/10-K 中的描述及最新指引，评估未来增长的可持续性。
-            - **交易员情绪 (Sentiment)**: 结合 X (Twitter) 上的讨论内容，分析市场情绪（FOMO/恐慌/分歧），并判断是否与基本面出现背离。
-            - **基本面质量**: 评估 ROE 和负债水平，判断公司的护城河与抗风险能力。
-            - **资金流分析 (Smart Money)**: 解读期权异动数据。是否有大资金在 OTM 位置通过 Call 扫货博取反弹？或者大量 Put 正在对冲下行风险？识别主力资金的布局点位。
-            - **期权博弈与 Gamma Squeeze**: 
+            ### 2. 🔬 微观筹码与期权博弈 (Micro & Chips)
+            - **Gamma Squeeze 风险**: 分析 Call Wall/Put Wall 位置，判断是否存在逼空或杀跌动能。
+            - **资金流向 (Smart Money)**: 解读期权异动 (Option Flow)，主力是在布局反弹还是对冲风险？
+            - **交易员情绪**: 结合社交媒体情绪，判断市场是否过热或恐慌。
+
+            ### 3. 📈 技术面共振 (Technicals)
+            - **关键均线**: 50D/200D SMA 的支撑与阻力。
+            - **指标信号**: RSI 是否超买/超卖？MACD 是否背离？
+
+            ### 4. ⚔️ 交易执行方案 (Execution)
+            - **投资评级**: (Tactical Buy / Hold / Sell)
+            - **AI 置信度**: (例如: High Confidence 85%)
+            - **操作计划**:
+              - 入场区间 (Entry): [具体价格]
+              - 目标止盈 (TP): [具体价格]
+              - 硬性止损 (SL): [具体价格]
+            
+            请使用专业、简洁、富有洞察力的语言输出。
+            """
+        try:
+            loop = asyncio.get_running_loop()
+            
+            def call_deepseek():
+                response = client.chat.completions.create(
+                    model=MODEL_ID,
+                    messages=[{"role": "user", "content": prompt}],
+                    stream=False
+                )
+                return response.choices[0].message.content
+
+            return await loop.run_in_executor(None, call_deepseek)
+        except Exception as e:
+            return f"AI 分析生成失败: {str(e)}"
+
+# ================= Discord 命令处理 =================
+
+@bot.event
+async def on_ready():
+    print(f'✅ Bot 已登录: {bot.user}')
+    print('DeepSeek 模式就绪。尝试输入: !a TSLA')
+
+@bot.command(name='a', aliases=['analyze', 'stock', 'gp'])
+async def analyze(ctx, ticker: str):
+    """
+    分析股票命令。用法: !a TSLA 或 !a 600519
+    """
+    ticker = ticker.upper()
+    
+    # === A股代码自动后缀补全 ===
+    if ticker.isdigit() and len(ticker) == 6:
+        if ticker.startswith('6'):
+            ticker = f"{ticker}.SS" # 上海证券交易所
+        elif ticker.startswith(('0', '3')):
+            ticker = f"{ticker}.SZ" # 深圳证券交易所
+        elif ticker.startswith(('4', '8')):
+            ticker = f"{ticker}.BJ" # 北京证券交易所
+
+    status_msg = await ctx.send(f"🔍 正在分析 **{ticker}**，请稍候...")
+    
+    try:
+        # 1. 获取数据
+        await status_msg.edit(content=f"🧠 正在获取 **{ticker}** 的基本面、新闻和历史数据...")
+        df, fund, news = StockAnalyzer.get_data(ticker)
+        
+        if df is None:
+            await status_msg.edit(content=f"❌ 找不到股票代码 **{ticker}**，请检查拼写或重试。")
+            return
+
+        # 计算涨跌幅
+        price_change = 0
+        if len(df) >= 2:
+            price_change = (df['Close'].iloc[-1] - df['Close'].iloc[-2]) / df['Close'].iloc[-2]
+
+        # 2. 计算指标
+        await status_msg.edit(content=f"📈 正在计算 **{ticker}** 的技术指标与量化信号...")
+        df_tech = StockAnalyzer.calculate_indicators(df)
+        
+        # 3. 执行网络搜索 (在后台线程运行以防阻塞)
+        loop = asyncio.get_running_loop()
+        web_results = await loop.run_in_executor(None, lambda: StockAnalyzer.get_web_search(ticker))
+
+        # 4. 初始化 Ticker 对象 (复用以提高效率)
+        stock_obj = yf.Ticker(ticker)
+
+        # 5. 计算 Gamma Exposure (GEX)
+        await status_msg.edit(content=f"🧮 正在计算 **{ticker}** 的 Gamma Exposure (GEX) 与挤压风险...")
+        gex_data = await loop.run_in_executor(None, lambda: StockAnalyzer.get_gamma_exposure(stock_obj, fund['price']))
+
+        # 6. 扫描期权资金流 (Option Flow)
+        await status_msg.edit(content=f"💸 正在扫描 **{ticker}** 的期权资金流与聪明钱布局...")
+        flow_data = await loop.run_in_executor(None, lambda: StockAnalyzer.get_option_flow(stock_obj, fund['price']))
+
+        # 7. 生成期权 OI 图表
+        oi_chart_buffer = await loop.run_in_executor(None, lambda: StockAnalyzer.get_option_open_interest_chart(stock_obj, fund['price']))
+
+        # 8. 获取 AI 报告
+        await status_msg.edit(content=f"🤖 DeepSeek R1 (深度思考模式) 正在生成分析报告...")
+        report = await StockAnalyzer.get_ai_analysis(ticker, fund, df_tech, news, web_results, gex_data, flow_data)
+
+        # 9. 构建 Embed 消息
+        embed = discord.Embed(
+            title=f"📑 {ticker} 深度投资分析报告",
+            description=report,
+            color=0x1a73e8 # Google Blue
+        )
+        
+        latest = df_tech.iloc[-1]
+        embed.add_field(name="当前价格", value=f"{fund['price']}", inline=True)
+        embed.add_field(name="P/E 估值", value=f"{fund['pe']}", inline=True)
+        embed.add_field(name="P/B 估值", value=f"{fund['pb']}", inline=True)
+        embed.add_field(name="RSI (14)", value=f"{latest['RSI']:.1f}", inline=True)
+        embed.add_field(name="波动率", value=f"{latest['Volatility']:.2%}", inline=True)
+        embed.add_field(name="P/C Ratio (Vol)", value=f"{fund['pc_ratio_vol']}", inline=True)
+        if gex_data:
+            embed.add_field(name="Call Wall (阻力)", value=f"{gex_data['call_wall']}", inline=True)
+            embed.add_field(name="Put Wall (支撑)", value=f"{gex_data['put_wall']}", inline=True)
+        if flow_data:
+            top_flow = flow_data[0]
+            embed.add_field(name="最大异动", value=f"{top_flow['type']} {top_flow['strike']} (Vol:{top_flow['volume']})", inline=True)
+        embed.add_field(name="趋势 (50/200)", value=f'{"金叉" if latest["SMA_50"] > latest["SMA_200"] else "死叉"}', inline=True)
+
+        embed.set_footer(text=f"分析对象: {fund['name']} | Host: {socket.gethostname()} | 由 DeepSeek AI 强力驱动")
+        embed.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/8569/8569731.png") # 一个中性的图表icon
+
+        # 10. 生成 PDF 并发送
+        pdf_file = None
+        pdf_buffer = StockAnalyzer.create_pdf_report(ticker, report, fund, latest, price_change, oi_chart_buffer)
+        if pdf_buffer:
+            pdf_file = discord.File(pdf_buffer, filename=f"{ticker}_Analysis.pdf")
+
+        # 11. 发送结果
+        await status_msg.edit(content="", embed=embed, attachments=[pdf_file] if pdf_file else [])
+
+    except Exception as e:
+        error_message = f"❌ 处理 **{ticker}** 时发生严重错误: {str(e)}\n"
+        error_message += "这可能是由于数据源问题或内部计算错误。请稍后再试。"
+        await status_msg.edit(content=error_message)
                 1. 分析 P/C Ratio 判断情绪。
                 2. **重点分析 Gamma 数据**: 
                    - 如果当前价格接近 **Call Wall**，是否存在向上突破引发 Gamma Squeeze (逼空) 的可能？
