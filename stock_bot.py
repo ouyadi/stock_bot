@@ -28,7 +28,7 @@ import json
 import time
 from supabase import create_client, Client
 import uvicorn
-from fastapi import FastAPI, Form, File, UploadFile, HTTPException, Body, Request
+from fastapi import FastAPI, Form, File, UploadFile, HTTPException, Body, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
@@ -192,85 +192,12 @@ class CloudmailinPayload(BaseModel):
     subject: Optional[str] = "无主题"
     attachments: List[CloudmailinAttachment] = []
 
-@app.post("/email-report")
-async def handle_email_report(request: Request):
-    """
-    接收来自 CloudMailIn 的邮件 POST 请求，进行处理和转发。
-    """
-    print("📧 收到新邮件请求...")
-    content_type = request.headers.get("content-type", "")
-    payload = None
-    subject = "未知主题"
-
-    # === 1. 解析请求数据 (支持 JSON 和 Multipart) ===
-    if "application/json" in content_type:
-        # 处理 Google Script 发送的 JSON
-        try:
-            data = await request.json()
-            print("🔍 解析 JSON Payload (Google Script)")
-            
-            subject = data.get("subject", "无主题")
-            plain = data.get("body")
-            html = None # Google Script 通常只发送 getPlainBody
-            
-            attachments_list = []
-            for att in data.get("attachments", []):
-                content_b64 = att.get("content", "")
-                attachments_list.append(CloudmailinAttachment(
-                    file_name=att.get("fileName", "unknown"),
-                    content_type=att.get("mimeType", "application/octet-stream"),
-                    content=content_b64,
-                    size=len(content_b64)
-                ))
-            
-            payload = CloudmailinPayload(
-                plain=plain,
-                html=html,
-                subject=subject,
-                attachments=attachments_list
-            )
-        except Exception as e:
-            print(f"JSON Parse Error: {e}")
-            raise HTTPException(status_code=400, detail=f"JSON parsing error: {e}")
-    else:
-        # 处理 CloudMailIn 发送的 Multipart Form Data
-        try:
-            form = await request.form()
-            print(f"🔍 Form Keys: {list(form.keys())}")
-            
-            plain = form.get("plain")
-            html = form.get("html")
-            subject = form.get("headers[subject]") or form.get("subject") or "无主题"
-            
-            attachments_list = []
-            for key, value in form.multi_items():
-                if isinstance(value, UploadFile) or (hasattr(value, "filename") and value.filename):
-                    print(f"📂 收到附件: {value.filename} (Key: {key}, Content-Type: {value.content_type})")
-                    try:
-                        content = await value.read()
-                        if content:
-                            b64_content = base64.b64encode(content).decode('utf-8')
-                            attachments_list.append(CloudmailinAttachment(
-                                file_name=value.filename or "unknown",
-                                content_type=value.content_type or "application/octet-stream",
-                                content=b64_content,
-                                size=len(content)
-                            ))
-                    finally:
-                        await value.close()
-                elif "attachment" in key:
-                        print(f"⚠️ 发现疑似附件字段 '{key}' 但未被识别为文件对象 (Type: {type(value)})")
-            
-            payload = CloudmailinPayload(
-                plain=str(plain) if plain else None,
-                html=str(html) if html else None,
-                subject=str(subject),
-                attachments=attachments_list
-            )
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Form parsing error: {e}")
-
-    # === 新增: 发送初始状态消息 ===
+async def process_email_task(payload: CloudmailinPayload):
+    """后台异步处理邮件任务"""
+    subject = payload.subject
+    print(f"🔄 后台任务启动: 处理邮件 '{subject}'")
+    
+    # === 发送初始状态消息 ===
     status_msg = None
     try:
         channel_id = int(INSTITUTION_REPORT_CHANNEL_ID)
@@ -378,7 +305,11 @@ async def handle_email_report(request: Request):
                 if "图片(未OCR)" not in sources: sources.append("图片(未OCR)")
 
         if not parts:
-            raise HTTPException(status_code=400, detail="邮件内容为空")
+            print("❌ 邮件内容为空")
+            if status_msg:
+                try: await status_msg.edit(content=f"❌ 处理邮件 **{subject}** 失败: 邮件内容为空")
+                except: pass
+            return
 
         analysis_content = "\n\n".join(parts)
         source = ", ".join(sources)
@@ -404,7 +335,11 @@ async def handle_email_report(request: Request):
         pdf_buffer = ResearchAnalyzer.create_summary_pdf(summary_text, payload.subject)
         
         if not pdf_buffer:
-            raise HTTPException(status_code=500, detail="无法生成 PDF")
+            print("❌ 无法生成 PDF")
+            if status_msg:
+                try: await status_msg.edit(content=f"❌ 处理邮件 **{subject}** 失败: 无法生成 PDF")
+                except: pass
+            return
             
         if status_msg:
             try: await status_msg.edit(content=f"📧 收到新邮件: **{subject}**\n☁️ PDF 生成完毕，正在上传至 Supabase...")
@@ -427,14 +362,96 @@ async def handle_email_report(request: Request):
         await ResearchAnalyzer.send_discord_notification(summary_text, payload.subject, public_url, status_msg)
 
         print("✅ 投研报告处理流程完成!")
-        return {"status": "success", "source": source, "subject": payload.subject, "pdf_url": public_url}
 
     except Exception as e:
         print(f"处理邮件时发生严重错误: {e}")
         if status_msg:
             try: await status_msg.edit(content=f"❌ 处理邮件 **{subject}** 时发生错误: {str(e)}")
             except: pass
-        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/email-report")
+async def handle_email_report(request: Request, background_tasks: BackgroundTasks):
+    """
+    接收来自 CloudMailIn 的邮件 POST 请求，进行处理和转发。
+    """
+    print("📧 收到新邮件请求...")
+    content_type = request.headers.get("content-type", "")
+    payload = None
+    subject = "未知主题"
+
+    # === 1. 解析请求数据 (支持 JSON 和 Multipart) ===
+    if "application/json" in content_type:
+        # 处理 Google Script 发送的 JSON
+        try:
+            data = await request.json()
+            print("🔍 解析 JSON Payload (Google Script)")
+            
+            subject = data.get("subject", "无主题")
+            plain = data.get("body")
+            html = None # Google Script 通常只发送 getPlainBody
+            
+            attachments_list = []
+            for att in data.get("attachments", []):
+                content_b64 = att.get("content", "")
+                attachments_list.append(CloudmailinAttachment(
+                    file_name=att.get("fileName", "unknown"),
+                    content_type=att.get("mimeType", "application/octet-stream"),
+                    content=content_b64,
+                    size=len(content_b64)
+                ))
+            
+            payload = CloudmailinPayload(
+                plain=plain,
+                html=html,
+                subject=subject,
+                attachments=attachments_list
+            )
+        except Exception as e:
+            print(f"JSON Parse Error: {e}")
+            raise HTTPException(status_code=400, detail=f"JSON parsing error: {e}")
+    else:
+        # 处理 CloudMailIn 发送的 Multipart Form Data
+        try:
+            form = await request.form()
+            print(f"🔍 Form Keys: {list(form.keys())}")
+            
+            plain = form.get("plain")
+            html = form.get("html")
+            subject = form.get("headers[subject]") or form.get("subject") or "无主题"
+            
+            attachments_list = []
+            for key, value in form.multi_items():
+                if isinstance(value, UploadFile) or (hasattr(value, "filename") and value.filename):
+                    print(f"📂 收到附件: {value.filename} (Key: {key}, Content-Type: {value.content_type})")
+                    try:
+                        content = await value.read()
+                        if content:
+                            b64_content = base64.b64encode(content).decode('utf-8')
+                            attachments_list.append(CloudmailinAttachment(
+                                file_name=value.filename or "unknown",
+                                content_type=value.content_type or "application/octet-stream",
+                                content=b64_content,
+                                size=len(content)
+                            ))
+                    finally:
+                        await value.close()
+                elif "attachment" in key:
+                        print(f"⚠️ 发现疑似附件字段 '{key}' 但未被识别为文件对象 (Type: {type(value)})")
+            
+            payload = CloudmailinPayload(
+                plain=str(plain) if plain else None,
+                html=str(html) if html else None,
+                subject=str(subject),
+                attachments=attachments_list
+            )
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Form parsing error: {e}")
+
+    # 2. 添加到后台任务
+    background_tasks.add_task(process_email_task, payload)
+    
+    # 3. 立即返回响应
+    return {"status": "received", "message": "Processing started in background"}
 
 class AnalyzeRequest(BaseModel):
     ticker: str
