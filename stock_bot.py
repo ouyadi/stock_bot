@@ -19,6 +19,8 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+import requests
+from bs4 import BeautifulSoup
 
 # ================= 配置区域 =================
 # 建议使用环境变量，或者直接在此处填入 Key
@@ -83,7 +85,55 @@ class StockAnalyzer:
                 "peg_ratio": info.get('pegRatio', 'N/A'),
                 "profit_margins": info.get('profitMargins', 'N/A'),
                 "short_percent": info.get('shortPercentOfFloat', 'N/A'),
+                "business_summary": info.get('longBusinessSummary', '暂无详细业务描述'),
+                "cik": info.get('cik', None),
             }
+
+            # === 新增: 财务报表数据 (10-Q/10-K) ===
+            financials_data = {}
+            try:
+                # 获取季度报表
+                q_income = stock.quarterly_financials
+                q_balance = stock.quarterly_balance_sheet
+                q_cashflow = stock.quarterly_cashflow
+
+                if not q_income.empty:
+                    latest_q = q_income.iloc[:, 0] # 最近一个季度
+                    financials_data['date'] = str(latest_q.name).split(' ')[0]
+                    financials_data['revenue'] = latest_q.get('Total Revenue', 'N/A')
+                    financials_data['net_income'] = latest_q.get('Net Income', 'N/A')
+                    financials_data['gross_profit'] = latest_q.get('Gross Profit', 'N/A')
+                
+                if not q_balance.empty:
+                    latest_b = q_balance.iloc[:, 0]
+                    financials_data['total_cash'] = latest_b.get('Cash And Cash Equivalents', 'N/A')
+                    financials_data['total_debt'] = latest_b.get('Total Debt', 'N/A')
+                
+                if not q_cashflow.empty:
+                    latest_c = q_cashflow.iloc[:, 0]
+                    financials_data['op_cashflow'] = latest_c.get('Operating Cash Flow', 'N/A')
+            except Exception as e:
+                print(f"Financials Error: {e}")
+            
+            fundamentals['financials'] = financials_data
+
+            # === 新增: 分析师数据 ===
+            analyst_data = {
+                'target_mean': info.get('targetMeanPrice', 'N/A'),
+                'target_high': info.get('targetHighPrice', 'N/A'),
+                'target_low': info.get('targetLowPrice', 'N/A'),
+                'recommendation': info.get('recommendationKey', 'N/A'),
+                'num_analysts': info.get('numberOfAnalystOpinions', 'N/A'),
+                'recent_ratings': []
+            }
+            try:
+                upgrades = stock.upgrades_downgrades
+                if upgrades is not None and not upgrades.empty:
+                    latest_upgrades = upgrades.sort_index(ascending=False).head(3)
+                    for index, row in latest_upgrades.iterrows():
+                        analyst_data['recent_ratings'].append(f"{str(index).split(' ')[0]}: {row['Firm']} -> {row['ToGrade']}")
+            except Exception: pass
+            fundamentals['analyst'] = analyst_data
 
             # === 获取期权数据 (Put/Call Ratio) ===
             try:
@@ -152,15 +202,81 @@ class StockAnalyzer:
     @staticmethod
     def get_web_search(ticker):
         """使用 DuckDuckGo 搜索最新的市场新闻和事件"""
+        """使用 DuckDuckGo 搜索最新的市场新闻、事件以及管理层指引"""
+        results = []
         try:
             with DDGS() as ddgs:
                 query = f"{ticker} stock latest news catalyst analysis"
                 # 获取前 3 条结果，包含标题和摘要
                 results = list(ddgs.text(query, max_results=3))
+                results.extend(list(ddgs.text(query, max_results=3)))
+                
+                # 新增: 搜索 10-Q/10-K 管理层指引与讨论
+                query_guidance = f"{ticker} stock earnings guidance management discussion 10-Q highlights"
+                results.extend(list(ddgs.text(query_guidance, max_results=2)))
+                
                 return results
         except Exception as e:
             print(f"Web Search Error: {e}")
             return []
+            return results
+
+    @staticmethod
+    def get_sec_filing(ticker, cik):
+        """从 SEC EDGAR 数据库下载最新的 10-Q 或 10-K 报告摘要"""
+        if not cik:
+            return None
+        
+        # SEC 要求 User-Agent 必须包含联系方式
+        headers = {'User-Agent': 'StockBotAnalysis/1.0 (bot_admin@example.com)'}
+        
+        try:
+            # 1. 获取提交历史
+            cik_padded = str(cik).zfill(10)
+            url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
+            
+            r = requests.get(url, headers=headers, timeout=10)
+            if r.status_code != 200: return None
+            data = r.json()
+            
+            # 2. 查找最新的 10-Q 或 10-K
+            recent = data['filings']['recent']
+            target_idx = -1
+            for i, form in enumerate(recent['form']):
+                if form in ['10-Q', '10-K']:
+                    target_idx = i
+                    break
+            
+            if target_idx == -1: return None
+            
+            # 3. 构建文档 URL
+            accession = recent['accessionNumber'][target_idx].replace('-', '')
+            primary_doc = recent['primaryDocument'][target_idx]
+            doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession}/{primary_doc}"
+            
+            # 4. 下载内容
+            r_doc = requests.get(doc_url, headers=headers, timeout=15)
+            if r_doc.status_code != 200: return None
+            
+            # 5. 解析并提取文本 (尝试定位 MD&A 部分)
+            soup = BeautifulSoup(r_doc.content, 'html.parser')
+            text = soup.get_text(separator='\n', strip=True)
+            
+            # 简单截取: 如果找到 "Management's Discussion"，则从那里开始截取，否则截取开头
+            start_idx = text.find("Management's Discussion")
+            if start_idx == -1: start_idx = 0
+            
+            excerpt = text[start_idx:start_idx+4000] # 截取 4000 字符供 AI 分析
+            
+            return {
+                'type': recent['form'][target_idx],
+                'date': recent['filingDate'][target_idx],
+                'url': doc_url,
+                'content': excerpt
+            }
+        except Exception as e:
+            print(f"SEC Download Error: {e}")
+            return None
 
     @staticmethod
     def black_scholes_gamma(S, K, T, r, sigma):
@@ -280,7 +396,7 @@ class StockAnalyzer:
             return None
 
     @staticmethod
-    async def get_ai_analysis(ticker, fund, tech_data, news_data, web_search_data, gex_data):
+    async def get_ai_analysis(ticker, fund, tech_data, news_data, web_search_data, gex_data, sec_data):
         """调用 LLM 生成更深度的自然语言报告"""
         latest = tech_data.iloc[-1]
         current_date = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -299,6 +415,18 @@ class StockAnalyzer:
             - Call Wall (最大阻力/做市商做空点): {gex_data['call_wall']}
             - Put Wall (最大支撑/做市商回补点): {gex_data['put_wall']}"""
 
+        # 格式化分析师评级
+        analyst_ratings_str = "- 暂无近期评级变动"
+        if fund['analyst']['recent_ratings']:
+            analyst_ratings_str = "\n".join([f"  - {r}" for r in fund['analyst']['recent_ratings']])
+
+        # 格式化 SEC 数据
+        sec_info = "- 暂无 SEC 报告数据"
+        if sec_data:
+            sec_info = f"""- 报告类型: {sec_data['type']} (发布日期: {sec_data['date']})
+            - 报告链接: {sec_data['url']}
+            - 核心摘要 (MD&A Extract): \n{sec_data['content']}..."""
+
         # 构建更强大的提示词 (Prompt)
         prompt = f"""
             # Role
@@ -309,6 +437,7 @@ class StockAnalyzer:
 
             ## 1. 标的基本面与质量 (Quality & Value)
             - 标的: {ticker} ({fund['name']}) | 行业: {fund['sector']}
+            - 业务概览 (10-K): {fund['business_summary'][:400]}...
             - 核心估值: P/E: {fund['pe']} | Fwd P/E: {fund['forward_pe']} | PEG: {fund['peg_ratio']} | P/B: {fund['pb']}
             - 盈利质量: ROE: {fund['roe']} | 净利率: {fund['profit_margins']} | EPS: {fund['eps']}
             - 财务杠杆: 负债权益比: {fund['debt_to_equity']} | Beta: {fund['beta']}
@@ -327,9 +456,23 @@ class StockAnalyzer:
 
             ## 4. 市场催化剂 (Catalysts)
             - 实时网络搜索 (Web Search):
+            ## 4. 市场催化剂与管理层指引 (Catalysts & Guidance)
+            - 实时网络搜索 (含新闻、10-Q/10-K指引):
             {web_content if web_content else "- 暂无网络搜索结果"}
             - 交易所新闻 (Exchange News): 
             {news_headlines if news_headlines else "- 暂无交易所新闻"}
+
+            ## 5. 财务报表透视 (Financials - Latest Quarter)
+            - 报告日期: {fund['financials'].get('date', 'N/A')}
+            - 总营收: {fund['financials'].get('revenue', 'N/A')} | 净利润: {fund['financials'].get('net_income', 'N/A')}
+            - 毛利润: {fund['financials'].get('gross_profit', 'N/A')} | 经营现金流: {fund['financials'].get('op_cashflow', 'N/A')}
+            - 资产负债: 现金储备 {fund['financials'].get('total_cash', 'N/A')} vs 总债务 {fund['financials'].get('total_debt', 'N/A')}
+
+            ## 6. 华尔街分析师共识 (Analyst Consensus)
+            - 综合评级: {fund['analyst']['recommendation']} (基于 {fund['analyst']['num_analysts']} 位分析师)
+            - 目标价: Mean: {fund['analyst']['target_mean']} | High: {fund['analyst']['target_high']} | Low: {fund['analyst']['target_low']}
+            - 近期机构评级变动:
+            {analyst_ratings_str}
 
             # Analysis Requirements
             请基于以上数据，生成一份逻辑严密、具备实战指导意义的分析报告。要求：
@@ -339,6 +482,8 @@ class StockAnalyzer:
 
             ### 2. 📊 因子深度分析
             - **估值与预期**: 结合 P/E 和 Forward P/E，判断市场当前的预期是否过高或过低。
+            - **财务健康度 (10-Q)**: 结合最新财报数据，分析营收/利润增长趋势及现金流状况。
+            - **业务指引与 SEC 披露**: 深度解读 SEC 报告中的 MD&A 摘要，分析管理层对未来经营环境的真实看法及潜在风险披露。
             - **基本面质量**: 评估 ROE 和负债水平，判断公司的护城河与抗风险能力。
             - **期权博弈与 Gamma Squeeze**: 
                 1. 分析 P/C Ratio 判断情绪。
@@ -423,11 +568,15 @@ async def analyze(ctx, ticker: str):
         await status_msg.edit(content=f"🧮 正在计算 **{ticker}** 的 Gamma Exposure (GEX) 与挤压风险...")
         gex_data = await loop.run_in_executor(None, lambda: StockAnalyzer.get_gamma_exposure(StockAnalyzer.get_data(ticker)[0].parent if hasattr(StockAnalyzer.get_data(ticker)[0], 'parent') else yf.Ticker(ticker), fund['price']))
 
-        # 5. 获取 AI 报告
-        await status_msg.edit(content=f"🤖 DeepSeek R1 (深度思考模式) 正在生成分析报告...")
-        report = await StockAnalyzer.get_ai_analysis(ticker, fund, df_tech, news, web_results, gex_data)
+        # 5. 获取 SEC 报告 (后台运行)
+        await status_msg.edit(content=f"🏛️ 正在从 SEC 数据库下载 **{ticker}** 的最新 10-Q/10-K 报告...")
+        sec_data = await loop.run_in_executor(None, lambda: StockAnalyzer.get_sec_filing(ticker, fund.get('cik')))
 
-        # 6. 构建 Embed 消息
+        # 6. 获取 AI 报告
+        await status_msg.edit(content=f"🤖 DeepSeek R1 (深度思考模式) 正在生成分析报告...")
+        report = await StockAnalyzer.get_ai_analysis(ticker, fund, df_tech, news, web_results, gex_data, sec_data)
+
+        # 7. 构建 Embed 消息
         embed = discord.Embed(
             title=f"📑 {ticker} 深度投资分析报告",
             description=report,
@@ -449,7 +598,7 @@ async def analyze(ctx, ticker: str):
         embed.set_footer(text=f"分析对象: {fund['name']} | Host: {socket.gethostname()} | 由 DeepSeek AI 强力驱动")
         embed.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/8569/8569731.png") # 一个中性的图表icon
 
-        # 7. 生成 PDF 并发送
+        # 8. 生成 PDF 并发送
         pdf_file = None
         pdf_buffer = StockAnalyzer.create_pdf_report(ticker, report, fund)
         if pdf_buffer:
