@@ -236,18 +236,20 @@ class StockAnalyzer:
                 query_guidance = f"{ticker} stock earnings guidance management discussion 10-Q highlights"
                 results.extend(list(ddgs.text(query_guidance, max_results=2)))
                 
-                # 4. 社交媒体情绪 (扩展到 Reddit 和 Stocktwits)
-                # Twitter 的搜索结果经常被 DuckDuckGo 过滤，增加 Reddit 和 Stocktwits 能显著提高成功率
-                query_social = f"{ticker} stock sentiment discussion site:reddit.com OR site:stocktwits.com OR site:x.com"
-                social_results = list(ddgs.text(query_social, max_results=4))
-                for r in social_results:
-                    source = "Social"
-                    link = r.get('href', '')
-                    if 'reddit.com' in link: source = "Reddit"
-                    elif 'stocktwits.com' in link: source = "Stocktwits"
-                    elif 'x.com' in link or 'twitter.com' in link: source = "X"
-                    r['title'] = f"[{source}] {r['title']}"
-                results.extend(social_results)
+                # 4. 社交媒体情绪 - 分开搜索以提高覆盖率
+                # 4.1 Reddit 深度讨论 (r/stocks, r/investing, r/wallstreetbets)
+                query_reddit = f"site:reddit.com {ticker} stock due diligence discussion analysis"
+                reddit_results = list(ddgs.text(query_reddit, max_results=3))
+                for r in reddit_results:
+                    r['title'] = f"[Reddit] {r['title']}"
+                results.extend(reddit_results)
+
+                # 4.2 Stocktwits 情绪 (散户大本营)
+                query_st = f"site:stocktwits.com {ticker} sentiment bullish bearish"
+                st_results = list(ddgs.text(query_st, max_results=2))
+                for r in st_results:
+                    r['title'] = f"[Stocktwits] {r['title']}"
+                results.extend(st_results)
 
                 return results
         except Exception as e:
