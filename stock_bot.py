@@ -541,8 +541,13 @@ class StockAnalyzer:
                 story.append(Spacer(1, 20))
             
             # 5. 解析 Markdown 文本并转换为 PDF 元素
+            def clean_text(text):
+                # 移除 Emoji 和非 BMP 字符，防止 STSong-Light 字体无法渲染导致的乱码
+                return "".join(c for c in text if c <= '\uFFFF')
+
             lines = report_text.split('\n')
             for line in lines:
+                line = clean_text(line)
                 # 检测缩进 (用于判断嵌套列表)
                 is_indented = line.startswith('  ') or line.startswith('\t')
                 
