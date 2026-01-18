@@ -1,15 +1,21 @@
-# 使用轻量级的 Python 3.11 镜像
+# 使用 Python 3.11 轻量版作为基础镜像
 FROM python:3.11-slim
 
 # 设置工作目录
 WORKDIR /app
 
-# 复制依赖文件并安装
+# 1. 安装系统依赖: Tesseract OCR 及其中文语言包
+# libgl1-mesa-glx 有时是图像处理库需要的依赖
+RUN apt-get update && apt-get install -y \
+    tesseract-ocr \
+    tesseract-ocr-chi-sim \
+    libgl1-mesa-glx \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. 复制并安装 Python 依赖
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 复制机器人代码
-COPY stock_bot.py .
-
-# 启动命令 (-u 参数保证日志实时输出)
-CMD ["python", "-u", "stock_bot.py"]
+# 3. 复制项目代码并启动
+COPY . .
+CMD ["python", "stock_bot.py"]

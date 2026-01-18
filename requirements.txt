@@ -8,10 +8,10 @@ scipy
 reportlab
 matplotlib
 supabase
-fastapi
 uvicorn
-pydantic
+fastapi
 python-multipart
-python-dotenv
 lxml
-PyPDF2
+pypdf2
+pytesseract
+Pillow
