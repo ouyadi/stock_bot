@@ -399,6 +399,9 @@ class StockAnalyzer:
             bullet_style = ParagraphStyle(
                 'CustomBullet', parent=normal_style, leftIndent=15, firstLineIndent=0, spaceAfter=4
             )
+            sub_bullet_style = ParagraphStyle(
+                'CustomSubBullet', parent=normal_style, leftIndent=35, firstLineIndent=0, spaceAfter=4
+            )
             
             story = []
             
@@ -438,6 +441,9 @@ class StockAnalyzer:
             # 3. 解析 Markdown 文本并转换为 PDF 元素
             lines = report_text.split('\n')
             for line in lines:
+                # 检测缩进 (用于判断嵌套列表)
+                is_indented = line.startswith('  ') or line.startswith('\t')
+                
                 line = line.strip()
                 if not line: continue
                 
@@ -446,15 +452,27 @@ class StockAnalyzer:
                 # 处理代码块标记 (移除)
                 line = line.replace('```', '')
                 
-                if line.startswith('###'):
-                    story.append(Paragraph(line.replace('###', '').strip(), heading_style))
-                elif line.startswith('##'):
-                    story.append(Paragraph(line.replace('##', '').strip(), heading_style))
-                elif line.startswith('#'):
-                    story.append(Paragraph(line.replace('#', '').strip(), title_style))
-                elif line.startswith('- '):
-                    # 列表项优化
-                    story.append(Paragraph(f"• {line[2:]}", bullet_style))
+                if line.startswith('#'):
+                    # 标题处理：优化编号与标题之间的间距
+                    level = line.count('#')
+                    text = line.lstrip('#').strip()
+                    # 使用 Regex 在数字编号(如 "1.")后添加不换行空格，增加间距
+                    text = re.sub(r'^(\d+\.)\s*', r'\1&nbsp;&nbsp;', text)
+                    
+                    if level == 1:
+                        story.append(Paragraph(text, title_style))
+                    else:
+                        story.append(Paragraph(text, heading_style))
+                        
+                elif line.startswith('- ') or line.startswith('* '):
+                    content = line[2:]
+                    # 策略部分优化：如果是风控参数相关的行，强制缩进
+                    is_strategy_param = re.match(r'^(入场|止盈|止损|仓位|Entry|TP|SL)', content)
+                    
+                    if is_indented or is_strategy_param:
+                        story.append(Paragraph(f"◦&nbsp; {content}", sub_bullet_style))
+                    else:
+                        story.append(Paragraph(f"•&nbsp; {content}", bullet_style))
                 else:
                     story.append(Paragraph(line, normal_style))
             
