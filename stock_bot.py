@@ -427,7 +427,6 @@ class StockAnalyzer:
             return None
 
     @staticmethod
-    async def get_ai_analysis(ticker, fund, tech_data, news_data, web_search_data, gex_data):
     async def get_ai_analysis(ticker, fund, tech_data, news_data, web_search_data, gex_data, flow_data):
         """调用 LLM 生成更深度的自然语言报告"""
         latest = tech_data.iloc[-1]
@@ -607,26 +606,21 @@ async def analyze(ctx, ticker: str):
         loop = asyncio.get_running_loop()
         web_results = await loop.run_in_executor(None, lambda: StockAnalyzer.get_web_search(ticker))
 
-        # 4. 计算 Gamma Exposure (GEX)
         # 4. 初始化 Ticker 对象 (复用以提高效率)
         stock_obj = yf.Ticker(ticker)
 
         # 5. 计算 Gamma Exposure (GEX)
         await status_msg.edit(content=f"🧮 正在计算 **{ticker}** 的 Gamma Exposure (GEX) 与挤压风险...")
-        gex_data = await loop.run_in_executor(None, lambda: StockAnalyzer.get_gamma_exposure(StockAnalyzer.get_data(ticker)[0].parent if hasattr(StockAnalyzer.get_data(ticker)[0], 'parent') else yf.Ticker(ticker), fund['price']))
         gex_data = await loop.run_in_executor(None, lambda: StockAnalyzer.get_gamma_exposure(stock_obj, fund['price']))
 
-        # 5. 获取 AI 报告
         # 6. 扫描期权资金流 (Option Flow)
         await status_msg.edit(content=f"💸 正在扫描 **{ticker}** 的期权资金流与聪明钱布局...")
         flow_data = await loop.run_in_executor(None, lambda: StockAnalyzer.get_option_flow(stock_obj, fund['price']))
 
         # 7. 获取 AI 报告
         await status_msg.edit(content=f"🤖 DeepSeek R1 (深度思考模式) 正在生成分析报告...")
-        report = await StockAnalyzer.get_ai_analysis(ticker, fund, df_tech, news, web_results, gex_data)
         report = await StockAnalyzer.get_ai_analysis(ticker, fund, df_tech, news, web_results, gex_data, flow_data)
 
-        # 7. 构建 Embed 消息
         # 8. 构建 Embed 消息
         embed = discord.Embed(
             title=f"📑 {ticker} 深度投资分析报告",
@@ -652,7 +646,6 @@ async def analyze(ctx, ticker: str):
         embed.set_footer(text=f"分析对象: {fund['name']} | Host: {socket.gethostname()} | 由 DeepSeek AI 强力驱动")
         embed.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/8569/8569731.png") # 一个中性的图表icon
 
-        # 8. 生成 PDF 并发送
         # 9. 生成 PDF 并发送
         pdf_file = None
         pdf_buffer = StockAnalyzer.create_pdf_report(ticker, report, fund)
