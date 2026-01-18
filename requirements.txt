@@ -4,3 +4,4 @@ pandas
 openai
 duckduckgo-search
 scipy
+reportlab

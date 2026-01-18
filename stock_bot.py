@@ -12,6 +12,13 @@ import socket
 from duckduckgo_search import DDGS
 from scipy.stats import norm
 import datetime
+import io
+import re
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 
 # ================= 配置区域 =================
 # 建议使用环境变量，或者直接在此处填入 Key
@@ -214,9 +221,69 @@ class StockAnalyzer:
             return None
 
     @staticmethod
+    def create_pdf_report(ticker, report_text, fund_data):
+        """生成 PDF 报告"""
+        try:
+            buffer = io.BytesIO()
+            doc = SimpleDocTemplate(buffer, pagesize=letter)
+            styles = getSampleStyleSheet()
+            
+            # 注册中文字体 (STSong-Light 是 Adobe 预定义的简体中文字体，无需额外字体文件)
+            pdfmetrics.registerFont(UnicodeCIDFont('STSong-Light'))
+            
+            # 自定义样式
+            title_style = ParagraphStyle(
+                'Title', parent=styles['Title'], fontName='STSong-Light', fontSize=18, spaceAfter=12
+            )
+            heading_style = ParagraphStyle(
+                'Heading', parent=styles['Heading2'], fontName='STSong-Light', fontSize=14, spaceBefore=10, spaceAfter=6
+            )
+            normal_style = ParagraphStyle(
+                'Normal', parent=styles['Normal'], fontName='STSong-Light', fontSize=10, leading=14, spaceAfter=6
+            )
+            
+            story = []
+            story.append(Paragraph(f"{ticker} 深度投资分析报告", title_style))
+            
+            # 基本信息
+            info = f"""
+            <b>标的:</b> {fund_data.get('name', ticker)} ({ticker})<br/>
+            <b>价格:</b> {fund_data.get('price', 'N/A')} {fund_data.get('currency', '')}<br/>
+            <b>日期:</b> {datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}
+            """
+            story.append(Paragraph(info, normal_style))
+            story.append(Spacer(1, 12))
+            
+            # 解析 Markdown 文本并转换为 PDF 元素
+            lines = report_text.split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line: continue
+                
+                # 简单 Markdown 转换: 加粗
+                line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line)
+                
+                if line.startswith('###'):
+                    story.append(Paragraph(line.replace('###', '').strip(), heading_style))
+                elif line.startswith('##'):
+                    story.append(Paragraph(line.replace('##', '').strip(), heading_style))
+                elif line.startswith('#'):
+                    story.append(Paragraph(line.replace('#', '').strip(), title_style))
+                else:
+                    story.append(Paragraph(line, normal_style))
+            
+            doc.build(story)
+            buffer.seek(0)
+            return buffer
+        except Exception as e:
+            print(f"PDF Generation Error: {e}")
+            return None
+
+    @staticmethod
     async def get_ai_analysis(ticker, fund, tech_data, news_data, web_search_data, gex_data):
         """调用 LLM 生成更深度的自然语言报告"""
         latest = tech_data.iloc[-1]
+        current_date = datetime.datetime.now().strftime("%Y-%m-%d")
 
         # Safely extract news headlines, skipping items that might not have a 'title' key.
         news_headlines = "\n".join([f"- {n['title']}" for n in news_data[:5] if 'title' in n])
@@ -238,6 +305,8 @@ class StockAnalyzer:
             你是一位拥有20年深厚资历的华尔街量化与宏观对冲基金首席投资官 (CIO)。你擅长将自上而下的宏观逻辑（Top-Down）与自下而上的量化因子（Bottom-Up）相结合，挖掘市场尚未完全定价的“预期差”。
 
             # Input Data Panel
+            - **当前分析日期**: {current_date}
+
             ## 1. 标的基本面与质量 (Quality & Value)
             - 标的: {ticker} ({fund['name']}) | 行业: {fund['sector']}
             - 核心估值: P/E: {fund['pe']} | Fwd P/E: {fund['forward_pe']} | PEG: {fund['peg_ratio']} | P/B: {fund['pb']}
@@ -380,8 +449,14 @@ async def analyze(ctx, ticker: str):
         embed.set_footer(text=f"分析对象: {fund['name']} | Host: {socket.gethostname()} | 由 DeepSeek AI 强力驱动")
         embed.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/8569/8569731.png") # 一个中性的图表icon
 
+        # 7. 生成 PDF 并发送
+        pdf_file = None
+        pdf_buffer = StockAnalyzer.create_pdf_report(ticker, report, fund)
+        if pdf_buffer:
+            pdf_file = discord.File(pdf_buffer, filename=f"{ticker}_Analysis.pdf")
+
         # 5. 发送结果
-        await status_msg.edit(content="", embed=embed)
+        await status_msg.edit(content="", embed=embed, attachments=[pdf_file] if pdf_file else [])
 
     except Exception as e:
         error_message = f"❌ 处理 **{ticker}** 时发生严重错误: {str(e)}\n"
