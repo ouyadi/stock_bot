@@ -24,12 +24,18 @@ from reportlab.lib import colors
 import matplotlib
 matplotlib.use('Agg') # 设置后端为 Agg，适用于无头服务器环境
 import matplotlib.pyplot as plt
+import json
+import time
+from supabase import create_client, Client
 
 # ================= 配置区域 =================
 # 建议使用环境变量，或者直接在此处填入 Key
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
 DISCORD_AI_REPORT_CHANNEL_ID = os.getenv('DISCORD_AI_REPORT_CHANNEL_ID') # 指定频道 ID
+SUPABASE_URL = os.getenv('SUPABASE_URL')
+SUPABASE_KEY = os.getenv('SUPABASE_KEY')
+SUPABASE_BUCKET = os.getenv('SUPABASE_BUCKET', 'reports') # 默认 bucket 名为 reports
 
 
 # 配置 DeepSeek AI
@@ -41,6 +47,11 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
+# 配置 Supabase
+supabase: Client = None
+if SUPABASE_URL and SUPABASE_KEY:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 # ================= 健康检查模块 (用于部署) =================
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -50,6 +61,56 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
         self.wfile.write(b"OK")
+
+    def do_OPTIONS(self):
+        """Handle CORS preflight requests."""
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+
+    def do_POST(self):
+        """Handle analysis requests from web service."""
+        if self.path == '/analyze':
+            try:
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+                ticker = data.get('ticker')
+
+                if not ticker:
+                    self.send_response(400)
+                    self.end_headers()
+                    self.wfile.write(b"Missing ticker")
+                    return
+
+                print(f"🌐 Web Request: Analyzing {ticker}...")
+                
+                # 执行全流程分析
+                pdf_buffer, report_text = StockAnalyzer.run_full_analysis_pipeline(ticker)
+                
+                if not pdf_buffer:
+                    self.send_response(500)
+                    self.end_headers()
+                    self.wfile.write(b"Analysis failed")
+                    return
+
+                # 上传到 Supabase
+                public_url = StockAnalyzer.upload_to_supabase(ticker, pdf_buffer)
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*') # 允许跨域
+                self.end_headers()
+                response = {"ticker": ticker, "pdf_url": public_url, "report": report_text, "status": "success"}
+                self.wfile.write(json.dumps(response).encode())
+
+            except Exception as e:
+                print(f"Web Handler Error: {e}")
+                self.send_error(500, str(e))
+        else:
+            self.send_error(404)
 
 def run_health_check_server():
     """Runs a simple HTTP server for health checks in a background thread."""
@@ -62,6 +123,54 @@ def run_health_check_server():
 # ================= 核心逻辑模块 =================
 
 class StockAnalyzer:
+    @staticmethod
+    def run_full_analysis_pipeline(ticker):
+        """执行完整的分析流程 (同步方法，供 Web Service 调用)"""
+        try:
+            ticker = ticker.upper()
+            # A股后缀处理
+            if ticker.isdigit() and len(ticker) == 6:
+                if ticker.startswith('6'): ticker = f"{ticker}.SS"
+                elif ticker.startswith(('0', '3')): ticker = f"{ticker}.SZ"
+                elif ticker.startswith(('4', '8')): ticker = f"{ticker}.BJ"
+
+            # 1. 获取数据
+            df, fund, news = StockAnalyzer.get_data(ticker)
+            if df is None: return None, None
+
+            # 2. 计算指标
+            df_tech = StockAnalyzer.calculate_indicators(df)
+            latest = df_tech.iloc[-1]
+            price_change = 0
+            if len(df) >= 2:
+                price_change = (df['Close'].iloc[-1] - df['Close'].iloc[-2]) / df['Close'].iloc[-2]
+
+            # 3. 外部数据获取
+            web_results = StockAnalyzer.get_web_search(ticker)
+            stock_obj = yf.Ticker(ticker)
+            gex_data = StockAnalyzer.get_gamma_exposure(stock_obj, fund['price'])
+            flow_data = StockAnalyzer.get_option_flow(stock_obj, fund['price'])
+            oi_chart_buffer = StockAnalyzer.get_option_open_interest_chart(stock_obj, fund['price'])
+
+            # 4. AI 生成
+            report = StockAnalyzer._generate_ai_report_sync(ticker, fund, df_tech, news, web_results, gex_data, flow_data)
+
+            # 5. PDF 生成
+            pdf_buffer = StockAnalyzer.create_pdf_report(ticker, report, fund, latest, price_change, oi_chart_buffer)
+            return pdf_buffer, report
+        except Exception as e:
+            print(f"Pipeline Error: {e}")
+            return None, None
+
+    @staticmethod
+    def upload_to_supabase(ticker, pdf_buffer):
+        """上传 PDF 到 Supabase Storage 并返回公开链接"""
+        if not supabase: return "Supabase not configured"
+        filename = f"{ticker}_{int(time.time())}.pdf"
+        path = f"{filename}" # 可以根据需要加文件夹前缀
+        res = supabase.storage.from_(SUPABASE_BUCKET).upload(file=pdf_buffer.getvalue(), path=path, file_options={"content-type": "application/pdf"})
+        return supabase.storage.from_(SUPABASE_BUCKET).get_public_url(path)
+
     @staticmethod
     def get_data(ticker_symbol):
         """获取历史数据和更全面的基本面信息"""
@@ -652,8 +761,8 @@ class StockAnalyzer:
             return None
 
     @staticmethod
-    async def get_ai_analysis(ticker, fund, tech_data, news_data, web_search_data, gex_data, flow_data):
-        """调用 LLM 生成更深度的自然语言报告"""
+    def _generate_ai_report_sync(ticker, fund, tech_data, news_data, web_search_data, gex_data, flow_data):
+        """生成 AI 报告内容的同步核心方法"""
         latest = tech_data.iloc[-1]
         current_date = datetime.datetime.now().strftime("%Y-%m-%d")
 
@@ -760,18 +869,24 @@ class StockAnalyzer:
             
             请使用专业、简洁、富有洞察力的语言输出。
             """
+        
+        response = client.chat.completions.create(
+            model=MODEL_ID,
+            messages=[{"role": "user", "content": prompt}],
+            stream=False
+        )
+        return response.choices[0].message.content
+
+    @staticmethod
+    async def get_ai_analysis(ticker, fund, tech_data, news_data, web_search_data, gex_data, flow_data):
+        """调用 LLM 生成更深度的自然语言报告 (Async Wrapper)"""
         try:
             loop = asyncio.get_running_loop()
-            
-            def call_deepseek():
-                response = client.chat.completions.create(
-                    model=MODEL_ID,
-                    messages=[{"role": "user", "content": prompt}],
-                    stream=False
-                )
-                return response.choices[0].message.content
-
-            return await loop.run_in_executor(None, call_deepseek)
+            # 复用同步生成方法
+            return await loop.run_in_executor(
+                None, 
+                lambda: StockAnalyzer._generate_ai_report_sync(ticker, fund, tech_data, news_data, web_search_data, gex_data, flow_data)
+            )
         except Exception as e:
             return f"AI 分析生成失败: {str(e)}"
 

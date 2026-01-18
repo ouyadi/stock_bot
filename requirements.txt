@@ -6,3 +6,4 @@ ddgs
 scipy
 reportlab
 matplotlib
+supabase
