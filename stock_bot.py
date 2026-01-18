@@ -3,7 +3,7 @@ from discord.ext import commands
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from google import genai
+from openai import OpenAI
 import os
 import asyncio
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -13,12 +13,12 @@ import socket
 # ================= 配置区域 =================
 # 建议使用环境变量，或者直接在此处填入 Key
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
 
 
-# 配置 Gemini AI
-client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL_ID = 'gemini-2.0-flash'
+# 配置 DeepSeek AI
+client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
+MODEL_ID = 'deepseek-chat'
 
 # 配置 Discord Bot
 intents = discord.Intents.default()
@@ -70,6 +70,9 @@ class StockAnalyzer:
                 "debt_to_equity": info.get('debtToEquity', 'N/A'),
                 "forward_pe": info.get('forwardPE', 'N/A'),
                 "beta": info.get('beta', 'N/A'),
+                "peg_ratio": info.get('pegRatio', 'N/A'),
+                "profit_margins": info.get('profitMargins', 'N/A'),
+                "short_percent": info.get('shortPercentOfFloat', 'N/A'),
             }
             
             news = stock.news
@@ -122,62 +125,64 @@ class StockAnalyzer:
 
         # 构建更强大的提示词 (Prompt)
         prompt = f"""
-        # Role 定位
-        你是一位拥有20年经验的华尔街量化与宏观对冲基金首席投资官 (CIO)。你擅长将自上而下的宏观逻辑与自下而上的量化多因子分析相结合。
+            # Role
+            你是一位拥有20年深厚资历的华尔街量化与宏观对冲基金首席投资官 (CIO)。你擅长将自上而下的宏观逻辑（Top-Down）与自下而上的量化因子（Bottom-Up）相结合，挖掘市场尚未完全定价的“预期差”。
 
-        # 核心数据面板
-        【标的信息】
-        - 股票: {ticker} ({fund['name']}) | 行业: {fund['sector']}
-        - 价格/市值: {fund['price']} {fund['currency']} / {fund['market_cap']}
+            # Input Data Panel
+            ## 1. 标的基本面与质量 (Quality & Value)
+            - 标的: {ticker} ({fund['name']}) | 行业: {fund['sector']}
+            - 核心估值: P/E: {fund['pe']} | Fwd P/E: {fund['forward_pe']} | PEG: {fund['peg_ratio']} | P/B: {fund['pb']}
+            - 盈利质量: ROE: {fund['roe']} | 净利率: {fund['profit_margins']} | EPS: {fund['eps']}
+            - 财务杠杆: 负债权益比: {fund['debt_to_equity']} | Beta: {fund['beta']}
 
-        【多因子基本面】
-        - 估值维度: P/E (TTM): {fund['pe']} | Forward P/E: {fund['forward_pe']} | P/B: {fund['pb']}
-        - 质量维度: ROE: {fund['roe']} | EPS: {fund['eps']} | 负债权益比: {fund['debt_to_equity']}
-        - 增长维度: [请根据行业背景评估其营收与利润增长动能]
+            ## 2. 量化与技术面 (Quant & Technicals)
+            - 趋势指标: 50D SMA: {latest['SMA_50']:.2f} | 200D SMA: {latest['SMA_200']:.2f}
+            - 动能指标: RSI: {latest['RSI']:.2f} | MACD: {latest['MACD']:.2f} (Signal: {latest['MACD_Signal']:.2f})
+            - 波动率: 30日年化波动率: {latest['Volatility']:.2%}
+            - 布林带位置: Upper: {latest['BB_Upper']:.2f} | Lower: {latest['BB_Lower']:.2f} | Close: {latest['Close']:.2f}
 
-        【量化与波动特征】
-        - 30日年化波动率: {latest['Volatility']:.2%}
-        - 贝塔系数 (Beta): {fund['beta']}
+            ## 3. 市场催化剂 (Catalysts)
+            - 空头流通占比 (Short Float): {fund['short_percent']}
+            - 近期核心新闻: 
+            {news_headlines if news_headlines else "- 暂无显著催化剂"}
 
-        【技术面共振】
-        - 动能指标: RSI(14): {latest['RSI']:.2f} | MACD: {latest['MACD']:.2f} (信号线: {latest['MACD_Signal']:.2f})
-        - 均线结构: 50D SMA: {latest['SMA_50']:.2f} | 200D SMA: {latest['SMA_200']:.2f} (当前价格{"偏离" if abs(latest['Close']-latest['SMA_200'])/latest['SMA_200'] > 0.1 else "贴近"}长周期成本线)
-        - 波动区间: 布林带 ({latest['BB_Lower']:.2f} - {latest['BB_Upper']:.2f})
+            # Analysis Requirements
+            请基于以上数据，生成一份逻辑严密、具备实战指导意义的分析报告。要求：
 
-        【市场情绪与驱动力】
-        - 近期新闻摘要: {news_headlines if news_headlines else "- 暂无显著负面/正面催化剂"}
-        - 宏观环境背景: [当前利率环境、行业监管政策、汇率变动]
+            ### 1. 🏛️ 宏观叙事与行业定性
+            分析当前宏观环境对该行业及公司的边际影响。判断标的处于周期的哪个阶段。
 
-        # 任务要求：撰写深度投资分析报告
-        请生成一份严谨、具备实战指导意义的 Markdown 格式报告，包含：
+            ### 2. 📊 因子深度分析
+            - **估值与预期**: 结合 P/E 和 Forward P/E，判断市场当前的预期是否过高或过低。
+            - **基本面质量**: 评估 ROE 和负债水平，判断公司的护城河与抗风险能力。
 
-        ## 1. 💎 核心投资逻辑 (Investment Thesis)
-        不要罗列数据，请给出“一针见血”的判断。目前是估值修复、动能追涨还是价值陷阱？是否存在宏观叙事支持？
+            ### 3. 📈 技术面共振
+            - 分析 50D/200D 均线的排列关系（金叉/死叉）。
+            - 结合 RSI 和布林带位置，判断当前是否超买或超卖。
 
-        ## 2. 📊 财务质量与估值分位
-        - 对比行业平均水平，评估 {ticker} 的基本面防御性。
-        - 结合 ROE 和债务结构，分析其在当前高利率/低增长环境下的生存能力。
+            ### 4. 🛠️ 组合构建建议 (Portfolio Construction)
+            - **投资评级**: (强力买入 / 逢低买入 / 持股观望 / 卖出)
+            - **操作逻辑**: 给出基于“预期差”的核心逻辑。
+            - **风控参数**: 
+            - 入场区间 (Entry): [精确到价格范围]
+            - 目标止盈 (TP): [基于历史波动率或压力位]
+            - 硬性止损 (SL): [基于 $ATR$ 或关键支撑位]
+            - 建议仓位权重: (如：2% 试验仓 / 5% 标准仓 / 8% 进攻仓)
 
-        ## 3. 📉 量化特征与技术面博弈
-        - **趋势强度**: 分析均线系统是“多头排列”还是“均线缠绕”。
-        - **超买/超卖与背离**: RSI 是否与价格走势背离？MACD 金叉/死叉的含金量如何？
-        - **波动率挤压**: 根据布林带开口情况判断是否面临爆发性的方向选择。
-
-        ## 4. ⚡ 催化剂与风险溢价
-        - 深入分析近期新闻对资金流向的实际影响。
-        - 识别潜在的“黑天鹅”风险（如政策变动、财报暴雷点）。
-
-        ## 5. 🛠 机构级交易执行建议
-        - **评级**: (强力买入 / 逢低买入 / 持股观望 / 卖出)
-        - **策略结构**: 给出具体的 Entry (入场)、Target (目标价)、Stop-loss (止损位)。
-        - **仓位管理**: 建议配置权重 (如：轻仓试探、标准配置、进攻性配置)。
-
-        请直接输出报告内容，语言风格要求：专业、客观、不带情绪色彩，多使用金融专业术语。
-        """        
+            请使用专业、简洁、富有洞察力的语言输出。
+        """
         try:
             loop = asyncio.get_running_loop()
-            response = await loop.run_in_executor(None, lambda: client.models.generate_content(model=MODEL_ID, contents=prompt))
-            return response.text
+            
+            def call_deepseek():
+                response = client.chat.completions.create(
+                    model=MODEL_ID,
+                    messages=[{"role": "user", "content": prompt}],
+                    stream=False
+                )
+                return response.choices[0].message.content
+
+            return await loop.run_in_executor(None, call_deepseek)
         except Exception as e:
             return f"AI 分析生成失败: {str(e)}"
 
@@ -186,7 +191,7 @@ class StockAnalyzer:
 @bot.event
 async def on_ready():
     print(f'✅ Bot 已登录: {bot.user}')
-    print('Gemini 模式就绪。尝试输入: !a TSLA')
+    print('DeepSeek 模式就绪。尝试输入: !a TSLA')
 
 @bot.command(name='a', aliases=['analyze', 'stock', 'gp'])
 async def analyze(ctx, ticker: str):
@@ -211,7 +216,7 @@ async def analyze(ctx, ticker: str):
         df_tech = StockAnalyzer.calculate_indicators(df)
         
         # 3. 获取 AI 报告
-        await status_msg.edit(content=f"🤖 Gemini AI 正在生成深度分析报告...")
+        await status_msg.edit(content=f"🤖 DeepSeek AI 正在生成深度分析报告...")
         report = await StockAnalyzer.get_ai_analysis(ticker, fund, df_tech, news)
 
         # 4. 构建 Embed 消息
@@ -229,7 +234,7 @@ async def analyze(ctx, ticker: str):
         embed.add_field(name="波动率", value=f"{latest['Volatility']:.2%}", inline=True)
         embed.add_field(name="趋势 (50/200)", value=f'{"金叉" if latest["SMA_50"] > latest["SMA_200"] else "死叉"}', inline=True)
 
-        embed.set_footer(text=f"分析对象: {fund['name']} | Host: {socket.gethostname()} | 由 Gemini AI 强力驱动")
+        embed.set_footer(text=f"分析对象: {fund['name']} | Host: {socket.gethostname()} | 由 DeepSeek AI 强力驱动")
         embed.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/8569/8569731.png") # 一个中性的图表icon
 
         # 5. 发送结果
@@ -242,8 +247,8 @@ async def analyze(ctx, ticker: str):
 
 # 启动 Bot
 if __name__ == "__main__":
-    if not DISCORD_TOKEN or not GEMINI_API_KEY:
-        print("⚠️ 请设置 DISCORD_TOKEN 和 GEMINI_API_KEY 环境变量")
+    if not DISCORD_TOKEN or not DEEPSEEK_API_KEY:
+        print("⚠️ 请设置 DISCORD_TOKEN 和 DEEPSEEK_API_KEY 环境变量")
     else:
         # Start the health check server in a background thread for deployment platforms
         health_check_thread = threading.Thread(target=run_health_check_server)
