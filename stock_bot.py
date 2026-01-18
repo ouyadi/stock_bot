@@ -87,7 +87,7 @@ class ResearchAnalyzer:
         - **邮件主题**: {subject}
         - **报告内容**:
         ---
-        {content[:15000]} 
+        {content[:50000]} 
         ---
 
         # Task
@@ -220,46 +220,66 @@ async def handle_email_report(request: Request):
     analysis_content = ""
     source = ""
 
-    # 1. 提取内容 (PDF > 图片 > HTML > Plain Text)
-    pdf_attachments = [a for a in payload.attachments if "pdf" in a.content_type]
-    image_attachments = [a for a in payload.attachments if "image" in a.content_type]
+    # 1. 提取内容 (聚合所有来源: 正文 + PDF + 图片提示)
+    parts = []
+    sources = []
 
     try:
-        if pdf_attachments:
-            source = f"PDF附件: {pdf_attachments[0].file_name}"
-            print(f"📄 发现 PDF 附件: {source}")
-            pdf_content = base64.b64decode(pdf_attachments[0].content)
-            pdf_reader = PyPDF2.PdfReader(io.BytesIO(pdf_content))
-            for page in pdf_reader.pages:
-                analysis_content += page.extract_text() or ""
+        # --- 处理邮件正文 ---
+        body_text = ""
+        if payload.html:
+            try:
+                # 使用 lxml 清理 HTML 标签
+                doc = lxml_html.fromstring(payload.html)
+                # 移除脚本和样式
+                for bad in doc.xpath("//script | //style"):
+                    bad.getparent().remove(bad)
+                body_text = doc.text_content().strip()
+                if body_text:
+                    sources.append("HTML正文")
+            except Exception as e:
+                print(f"HTML parsing warning: {e}")
         
-        elif image_attachments:
-            # 当前模型不支持直接图片内容分析，所以只记录信息
-            source = f"图片附件: {[a.file_name for a in image_attachments]}"
-            print(f"🖼️ 发现图片附件 (暂不分析内容): {source}")
-            analysis_content = "邮件包含图片附件，请在原文中查看。"
-            # 未来可以集成图片识别模型
-            # for attachment in image_attachments:
-            #   image_data = base64.b64decode(attachment.content)
-            #   analysis_content += await image_to_text_model(image_data)
+        # 如果 HTML 解析失败或为空，尝试纯文本
+        if not body_text and payload.plain:
+            body_text = payload.plain.strip()
+            if body_text:
+                sources.append("纯文本正文")
+        
+        if body_text:
+            parts.append(f"=== 邮件正文 ===\n{body_text}")
 
-        elif payload.html:
-            source = "邮件正文 (HTML)"
-            print("📝 使用 HTML 邮件正文")
-            # 使用 lxml 清理 HTML 标签
-            doc = lxml_html.fromstring(payload.html)
-            # 移除脚本和样式
-            for bad in doc.xpath("//script | //style"):
-                bad.getparent().remove(bad)
-            analysis_content = doc.text_content()
-        
-        elif payload.plain:
-            source = "邮件正文 (纯文本)"
-            print("📄 使用纯文本邮件正文")
-            analysis_content = payload.plain
-        
-        else:
+        # --- 处理 PDF 附件 ---
+        pdf_attachments = [a for a in payload.attachments if "pdf" in a.content_type]
+        for pdf in pdf_attachments:
+            try:
+                print(f"📄 处理 PDF 附件: {pdf.file_name}")
+                pdf_content = base64.b64decode(pdf.content)
+                pdf_reader = PyPDF2.PdfReader(io.BytesIO(pdf_content))
+                pdf_text = ""
+                for page in pdf_reader.pages:
+                    pdf_text += page.extract_text() or ""
+                
+                if pdf_text.strip():
+                    parts.append(f"=== PDF附件: {pdf.file_name} ===\n{pdf_text}")
+                    sources.append(f"PDF:{pdf.file_name}")
+            except Exception as e:
+                print(f"PDF reading error ({pdf.file_name}): {e}")
+
+        # --- 处理图片附件 ---
+        image_attachments = [a for a in payload.attachments if "image" in a.content_type]
+        if image_attachments:
+            img_names = [a.file_name for a in image_attachments]
+            print(f"🖼️ 发现图片附件: {img_names}")
+            parts.append(f"=== 图片附件 ===\n[系统提示: 邮件包含 {len(image_attachments)} 张图片附件 ({', '.join(img_names)})，当前模型无法直接查看图片内容]")
+            sources.append(f"图片:{len(image_attachments)}张")
+
+        if not parts:
             raise HTTPException(status_code=400, detail="邮件内容为空")
+
+        analysis_content = "\n\n".join(parts)
+        source = ", ".join(sources)
+        print(f"📝 汇总内容来源: {source}")
 
         # 2. 调用 AI 进行总结
         print("🤖 正在发送内容到 DeepSeek 进行总结...")
