@@ -29,6 +29,7 @@ import matplotlib.pyplot as plt
 # 建议使用环境变量，或者直接在此处填入 Key
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
+DISCORD_AI_REPORT_CHANNEL_ID = os.getenv('DISCORD_AI_REPORT_CHANNEL_ID') # 指定频道 ID
 
 
 # 配置 DeepSeek AI
@@ -779,6 +780,8 @@ class StockAnalyzer:
 @bot.event
 async def on_ready():
     print(f'✅ Bot 已登录: {bot.user}')
+    if DISCORD_AI_REPORT_CHANNEL_ID:
+        print(f'🔒 频道限制已启用: 仅在频道 ID {DISCORD_AI_REPORT_CHANNEL_ID} 响应')
     print('DeepSeek 模式就绪。尝试输入: !a TSLA')
 
 @bot.command(name='a', aliases=['analyze', 'stock', 'gp'])
@@ -786,6 +789,13 @@ async def analyze(ctx, ticker: str):
     """
     分析股票命令。用法: !a TSLA 或 !a 600519
     """
+    # === 频道限制检查 ===
+    if DISCORD_AI_REPORT_CHANNEL_ID and str(ctx.channel.id) != str(DISCORD_AI_REPORT_CHANNEL_ID):
+        target_channel = bot.get_channel(int(DISCORD_AI_REPORT_CHANNEL_ID))
+        channel_name = target_channel.name if target_channel else "指定频道"
+        await ctx.send(f"⚠️ 请在指定频道 #{channel_name} 使用此命令。", delete_after=10)
+        return
+
     ticker = ticker.upper()
     
     # === A股代码自动后缀补全 ===
