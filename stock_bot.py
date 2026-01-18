@@ -216,15 +216,18 @@ async def handle_email_report(request: Request):
     attachments_list = []
     for key, value in form.multi_items():
         if isinstance(value, UploadFile):
-            content = await value.read()
-            if content:
-                b64_content = base64.b64encode(content).decode('utf-8')
-                attachments_list.append(CloudmailinAttachment(
-                    file_name=value.filename or "unknown",
-                    content_type=value.content_type or "application/octet-stream",
-                    content=b64_content,
-                    size=len(content)
-                ))
+            try:
+                content = await value.read()
+                if content:
+                    b64_content = base64.b64encode(content).decode('utf-8')
+                    attachments_list.append(CloudmailinAttachment(
+                        file_name=value.filename or "unknown",
+                        content_type=value.content_type or "application/octet-stream",
+                        content=b64_content,
+                        size=len(content)
+                    ))
+            finally:
+                await value.close()
     
     payload = CloudmailinPayload(
         plain=str(plain) if plain else None,
