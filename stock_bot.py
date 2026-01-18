@@ -306,6 +306,68 @@ class StockAnalyzer:
             return None
 
     @staticmethod
+    def get_option_flow(stock, current_price):
+        """分析期权资金流，寻找异常大单和聪明钱布局 (Volume > Open Interest)"""
+        try:
+            exps = stock.options
+            if not exps:
+                return []
+            
+            flow_data = []
+            today = datetime.date.today()
+            cutoff_date = today + datetime.timedelta(days=180)
+
+            # 扫描未来半年内的到期日
+            for date in exps:
+                try:
+                    if datetime.datetime.strptime(date, "%Y-%m-%d").date() > cutoff_date:
+                        continue
+                    opt = stock.option_chain(date)
+                    
+                    # 筛选逻辑: 成交量 > 500 且 成交量 > 持仓量 * 1.1 (疑似主力主动开仓)
+                    # Calls
+                    calls = opt.calls
+                    if not calls.empty:
+                        active_calls = calls[
+                            (calls['volume'] > 500) & 
+                            (calls['volume'] > calls['openInterest'] * 1.1)
+                        ].copy()
+                        for _, row in active_calls.iterrows():
+                            flow_data.append({
+                                'type': 'CALL 🐂',
+                                'expiry': date,
+                                'strike': row['strike'],
+                                'volume': int(row['volume']),
+                                'oi': int(row['openInterest']),
+                                'ratio': round(row['volume'] / (row['openInterest'] if row['openInterest'] > 0 else 1), 1)
+                            })
+
+                    # Puts
+                    puts = opt.puts
+                    if not puts.empty:
+                        active_puts = puts[
+                            (puts['volume'] > 500) & 
+                            (puts['volume'] > puts['openInterest'] * 1.1)
+                        ].copy()
+                        for _, row in active_puts.iterrows():
+                            flow_data.append({
+                                'type': 'PUT 🐻',
+                                'expiry': date,
+                                'strike': row['strike'],
+                                'volume': int(row['volume']),
+                                'oi': int(row['openInterest']),
+                                'ratio': round(row['volume'] / (row['openInterest'] if row['openInterest'] > 0 else 1), 1)
+                            })
+                except Exception: continue
+            
+            # 按成交量降序排序，取前 5 大异动
+            flow_data.sort(key=lambda x: x['volume'], reverse=True)
+            return flow_data[:5]
+        except Exception as e:
+            print(f"Flow Error: {e}")
+            return []
+
+    @staticmethod
     def create_pdf_report(ticker, report_text, fund_data):
         """生成 PDF 报告"""
         try:
@@ -366,6 +428,7 @@ class StockAnalyzer:
 
     @staticmethod
     async def get_ai_analysis(ticker, fund, tech_data, news_data, web_search_data, gex_data):
+    async def get_ai_analysis(ticker, fund, tech_data, news_data, web_search_data, gex_data, flow_data):
         """调用 LLM 生成更深度的自然语言报告"""
         latest = tech_data.iloc[-1]
         current_date = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -383,6 +446,11 @@ class StockAnalyzer:
             - Net GEX (净伽马敞口): ${gex_data['net_gex']:,.0f}
             - Call Wall (最大阻力/做市商做空点): {gex_data['call_wall']}
             - Put Wall (最大支撑/做市商回补点): {gex_data['put_wall']}"""
+
+        # 格式化资金流数据
+        flow_info = "- 暂无显著期权异动"
+        if flow_data:
+            flow_info = "\n".join([f"- {f['type']} | 到期: {f['expiry']} | 行权: {f['strike']} | Vol: {f['volume']} (OI: {f['oi']}, 倍数: {f['ratio']}x)" for f in flow_data])
 
         # 格式化分析师评级
         analyst_ratings_str = "- 暂无近期评级变动"
@@ -415,8 +483,13 @@ class StockAnalyzer:
             - 期权 Put/Call Ratio (Open Interest): {fund['pc_ratio_oi']}
             - 空头流通占比 (Short Float): {fund['short_percent']}
             {gex_info}
+            
+            ## 4. 资金流向与聪明钱 (Smart Money Flow)
+            - 异常期权异动 (Unusual Whales - Vol > OI):
+            {flow_info}
 
             ## 4. 市场催化剂、管理层指引与交易员情绪 (Catalysts, Guidance & Sentiment)
+            ## 5. 市场催化剂、管理层指引与交易员情绪 (Catalysts, Guidance & Sentiment)
             - 下次财报日期: {fund.get('next_earnings', 'N/A')} (距离现在 {fund.get('days_to_earnings', 'N/A')} 天)
             - 实时网络搜索 (含未来事件、IV分析、X/Twitter讨论):
             {web_content if web_content else "- 暂无网络搜索结果"}
@@ -424,12 +497,14 @@ class StockAnalyzer:
             {news_headlines if news_headlines else "- 暂无交易所新闻"}
 
             ## 5. 财务报表透视 (Financials - Latest Quarter)
+            ## 6. 财务报表透视 (Financials - Latest Quarter)
             - 报告日期: {fund['financials'].get('date', 'N/A')}
             - 总营收: {fund['financials'].get('revenue', 'N/A')} | 净利润: {fund['financials'].get('net_income', 'N/A')}
             - 毛利润: {fund['financials'].get('gross_profit', 'N/A')} | 经营现金流: {fund['financials'].get('op_cashflow', 'N/A')}
             - 资产负债: 现金储备 {fund['financials'].get('total_cash', 'N/A')} vs 总债务 {fund['financials'].get('total_debt', 'N/A')}
 
             ## 6. 华尔街分析师共识 (Analyst Consensus)
+            ## 7. 华尔街分析师共识 (Analyst Consensus)
             - 综合评级: {fund['analyst']['recommendation']} (基于 {fund['analyst']['num_analysts']} 位分析师)
             - 目标价: Mean: {fund['analyst']['target_mean']} | High: {fund['analyst']['target_high']} | Low: {fund['analyst']['target_low']}
             - 近期机构评级变动:
@@ -447,6 +522,7 @@ class StockAnalyzer:
             - **业务指引 (Guidance)**: 结合管理层在 10-Q/10-K 中的描述及最新指引，评估未来增长的可持续性。
             - **交易员情绪 (Sentiment)**: 结合 X (Twitter) 上的讨论内容，分析市场情绪（FOMO/恐慌/分歧），并判断是否与基本面出现背离。
             - **基本面质量**: 评估 ROE 和负债水平，判断公司的护城河与抗风险能力。
+            - **资金流分析 (Smart Money)**: 解读期权异动数据。是否有大资金在 OTM 位置通过 Call 扫货博取反弹？或者大量 Put 正在对冲下行风险？识别主力资金的布局点位。
             - **期权博弈与 Gamma Squeeze**: 
                 1. 分析 P/C Ratio 判断情绪。
                 2. **重点分析 Gamma 数据**: 
@@ -532,14 +608,26 @@ async def analyze(ctx, ticker: str):
         web_results = await loop.run_in_executor(None, lambda: StockAnalyzer.get_web_search(ticker))
 
         # 4. 计算 Gamma Exposure (GEX)
+        # 4. 初始化 Ticker 对象 (复用以提高效率)
+        stock_obj = yf.Ticker(ticker)
+
+        # 5. 计算 Gamma Exposure (GEX)
         await status_msg.edit(content=f"🧮 正在计算 **{ticker}** 的 Gamma Exposure (GEX) 与挤压风险...")
         gex_data = await loop.run_in_executor(None, lambda: StockAnalyzer.get_gamma_exposure(StockAnalyzer.get_data(ticker)[0].parent if hasattr(StockAnalyzer.get_data(ticker)[0], 'parent') else yf.Ticker(ticker), fund['price']))
+        gex_data = await loop.run_in_executor(None, lambda: StockAnalyzer.get_gamma_exposure(stock_obj, fund['price']))
 
         # 5. 获取 AI 报告
+        # 6. 扫描期权资金流 (Option Flow)
+        await status_msg.edit(content=f"💸 正在扫描 **{ticker}** 的期权资金流与聪明钱布局...")
+        flow_data = await loop.run_in_executor(None, lambda: StockAnalyzer.get_option_flow(stock_obj, fund['price']))
+
+        # 7. 获取 AI 报告
         await status_msg.edit(content=f"🤖 DeepSeek R1 (深度思考模式) 正在生成分析报告...")
         report = await StockAnalyzer.get_ai_analysis(ticker, fund, df_tech, news, web_results, gex_data)
+        report = await StockAnalyzer.get_ai_analysis(ticker, fund, df_tech, news, web_results, gex_data, flow_data)
 
         # 7. 构建 Embed 消息
+        # 8. 构建 Embed 消息
         embed = discord.Embed(
             title=f"📑 {ticker} 深度投资分析报告",
             description=report,
@@ -556,12 +644,16 @@ async def analyze(ctx, ticker: str):
         if gex_data:
             embed.add_field(name="Call Wall (阻力)", value=f"{gex_data['call_wall']}", inline=True)
             embed.add_field(name="Put Wall (支撑)", value=f"{gex_data['put_wall']}", inline=True)
+        if flow_data:
+            top_flow = flow_data[0]
+            embed.add_field(name="最大异动", value=f"{top_flow['type']} {top_flow['strike']} (Vol:{top_flow['volume']})", inline=True)
         embed.add_field(name="趋势 (50/200)", value=f'{"金叉" if latest["SMA_50"] > latest["SMA_200"] else "死叉"}', inline=True)
 
         embed.set_footer(text=f"分析对象: {fund['name']} | Host: {socket.gethostname()} | 由 DeepSeek AI 强力驱动")
         embed.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/8569/8569731.png") # 一个中性的图表icon
 
         # 8. 生成 PDF 并发送
+        # 9. 生成 PDF 并发送
         pdf_file = None
         pdf_buffer = StockAnalyzer.create_pdf_report(ticker, report, fund)
         if pdf_buffer:
