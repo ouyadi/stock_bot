@@ -236,11 +236,17 @@ class StockAnalyzer:
                 query_guidance = f"{ticker} stock earnings guidance management discussion 10-Q highlights"
                 results.extend(list(ddgs.text(query_guidance, max_results=2)))
                 
-                # 4. X (Twitter) 交易员情绪
-                query_social = f"site:twitter.com OR site:x.com {ticker} stock analysis sentiment discussion"
-                social_results = list(ddgs.text(query_social, max_results=2))
+                # 4. 社交媒体情绪 (扩展到 Reddit 和 Stocktwits)
+                # Twitter 的搜索结果经常被 DuckDuckGo 过滤，增加 Reddit 和 Stocktwits 能显著提高成功率
+                query_social = f"{ticker} stock sentiment discussion site:reddit.com OR site:stocktwits.com OR site:x.com"
+                social_results = list(ddgs.text(query_social, max_results=4))
                 for r in social_results:
-                    r['title'] = f"[X/Twitter] {r['title']}"
+                    source = "Social"
+                    link = r.get('href', '')
+                    if 'reddit.com' in link: source = "Reddit"
+                    elif 'stocktwits.com' in link: source = "Stocktwits"
+                    elif 'x.com' in link or 'twitter.com' in link: source = "X"
+                    r['title'] = f"[{source}] {r['title']}"
                 results.extend(social_results)
 
                 return results
