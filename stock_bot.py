@@ -127,6 +127,7 @@ class ResearchAnalyzer:
 
             title_style = ParagraphStyle('Title', fontName='STSong-Light', fontSize=18, alignment=1, spaceAfter=20, textColor=colors.navy)
             normal_style = ParagraphStyle('Normal', fontName='STSong-Light', fontSize=11, leading=14, spaceAfter=6)
+            bullet_style = ParagraphStyle('Bullet', parent=normal_style, leftIndent=10)
             
             story = []
             story.append(Paragraph(f"投研报告摘要: {subject}", title_style))
@@ -137,7 +138,7 @@ class ResearchAnalyzer:
                 if line.startswith('#'):
                     story.append(Paragraph(line.lstrip('#').strip(), ParagraphStyle('h2', parent=normal_style, fontSize=14, spaceBefore=10)))
                 elif line.startswith('- ') or line.startswith('* '):
-                    story.append(Paragraph(f"• {line[2:]}", normal_style, leftIndent=10))
+                    story.append(Paragraph(f"• {line[2:]}", bullet_style))
                 elif line:
                     story.append(Paragraph(line, normal_style))
 
@@ -149,7 +150,7 @@ class ResearchAnalyzer:
             return None
 
     @staticmethod
-    async def send_discord_notification(summary: str, subject: str, pdf_url: str):
+    async def send_discord_notification(summary: str, subject: str, pdf_url: str, status_msg: Optional[discord.Message] = None):
         """发送通知到指定的 Discord 频道"""
         channel_id = int(INSTITUTION_REPORT_CHANNEL_ID) # 投研机构带飞频道
         channel = bot.get_channel(channel_id)
@@ -165,7 +166,10 @@ class ResearchAnalyzer:
         embed.add_field(name="下载完整 PDF 报告", value=f"[点击这里]({pdf_url})", inline=False)
         embed.set_footer(text="由 CloudMailIn -> DeepSeek -> Supabase 驱动")
         
-        await channel.send(embed=embed)
+        if status_msg:
+            await status_msg.edit(content="", embed=embed)
+        else:
+            await channel.send(embed=embed)
 
 
 # 定义 CloudMailIn 的数据模型
@@ -198,6 +202,16 @@ async def handle_email_report(request: Request):
     plain = form.get("plain")
     html = form.get("html")
     subject = form.get("headers[subject]") or form.get("subject") or "无主题"
+    
+    # === 新增: 发送初始状态消息 ===
+    status_msg = None
+    try:
+        channel_id = int(INSTITUTION_REPORT_CHANNEL_ID)
+        channel = bot.get_channel(channel_id)
+        if channel:
+            status_msg = await channel.send(f"📧 收到新邮件: **{subject}**\n⏳ 正在解析附件与正文...")
+    except Exception as e:
+        print(f"Discord status update failed: {e}")
     
     attachments_list = []
     for key, value in form.multi_items():
@@ -282,6 +296,10 @@ async def handle_email_report(request: Request):
         analysis_content = "\n\n".join(parts)
         source = ", ".join(sources)
         print(f"📝 汇总内容来源: {source}")
+        
+        if status_msg:
+            try: await status_msg.edit(content=f"📧 收到新邮件: **{subject}**\n📝 内容提取完成 ({source})，正在调用 DeepSeek 进行深度分析...")
+            except: pass
 
         # 2. 调用 AI 进行总结
         print("🤖 正在发送内容到 DeepSeek 进行总结...")
@@ -289,6 +307,10 @@ async def handle_email_report(request: Request):
              summary_text = "报告内容为空或无法解析。"
         else:
              summary_text = await ResearchAnalyzer.summarize_content(analysis_content, payload.subject)
+        
+        if status_msg:
+            try: await status_msg.edit(content=f"📧 收到新邮件: **{subject}**\n🤖 AI 分析完成，正在生成 PDF 报告...")
+            except: pass
 
         # 3. 生成 PDF
         print("📑 正在生成摘要 PDF...")
@@ -296,6 +318,10 @@ async def handle_email_report(request: Request):
         
         if not pdf_buffer:
             raise HTTPException(status_code=500, detail="无法生成 PDF")
+            
+        if status_msg:
+            try: await status_msg.edit(content=f"📧 收到新邮件: **{subject}**\n☁️ PDF 生成完毕，正在上传至 Supabase...")
+            except: pass
 
         # 4. 上传到 Supabase
         print("☁️ 正在上传 PDF 到 Supabase...")
@@ -311,13 +337,16 @@ async def handle_email_report(request: Request):
 
         # 5. 发送到 Discord
         print("💬 正在发送通知到 Discord...")
-        await ResearchAnalyzer.send_discord_notification(summary_text, payload.subject, public_url)
+        await ResearchAnalyzer.send_discord_notification(summary_text, payload.subject, public_url, status_msg)
 
         print("✅ 投研报告处理流程完成!")
         return {"status": "success", "source": source, "subject": payload.subject, "pdf_url": public_url}
 
     except Exception as e:
         print(f"处理邮件时发生严重错误: {e}")
+        if status_msg:
+            try: await status_msg.edit(content=f"❌ 处理邮件 **{subject}** 时发生错误: {str(e)}")
+            except: pass
         raise HTTPException(status_code=500, detail=str(e))
 
 class AnalyzeRequest(BaseModel):
