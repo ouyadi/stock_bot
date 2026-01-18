@@ -548,7 +548,7 @@ class StockAnalyzer:
                 if not line: continue
                 
                 # 简单 Markdown 转换: 加粗
-                line = re.sub(r'\*\*(.*?)\*\*', r'<font color="#1a73e8"><b>\1</b></font>', line) # 加粗文字使用主题蓝，更醒目
+                line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line)
                 # 处理代码块标记 (移除)
                 line = line.replace('```', '')
                 
