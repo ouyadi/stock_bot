@@ -9,6 +9,7 @@ import asyncio
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 import socket
+from duckduckgo_search import DDGS
 
 # ================= 配置区域 =================
 # 建议使用环境变量，或者直接在此处填入 Key
@@ -116,12 +117,28 @@ class StockAnalyzer:
         return df
 
     @staticmethod
-    async def get_ai_analysis(ticker, fund, tech_data, news_data):
+    def get_web_search(ticker):
+        """使用 DuckDuckGo 搜索最新的市场新闻和事件"""
+        try:
+            with DDGS() as ddgs:
+                query = f"{ticker} stock latest news catalyst analysis"
+                # 获取前 3 条结果，包含标题和摘要
+                results = list(ddgs.text(query, max_results=3))
+                return results
+        except Exception as e:
+            print(f"Web Search Error: {e}")
+            return []
+
+    @staticmethod
+    async def get_ai_analysis(ticker, fund, tech_data, news_data, web_search_data):
         """调用 LLM 生成更深度的自然语言报告"""
         latest = tech_data.iloc[-1]
 
         # Safely extract news headlines, skipping items that might not have a 'title' key.
         news_headlines = "\n".join([f"- {n['title']}" for n in news_data[:5] if 'title' in n])
+        
+        # 格式化网络搜索结果
+        web_content = "\n".join([f"- [Web] {r['title']}: {r['body']}" for r in web_search_data])
 
         # 构建更强大的提示词 (Prompt)
         prompt = f"""
@@ -143,8 +160,10 @@ class StockAnalyzer:
 
             ## 3. 市场催化剂 (Catalysts)
             - 空头流通占比 (Short Float): {fund['short_percent']}
-            - 近期核心新闻: 
-            {news_headlines if news_headlines else "- 暂无显著催化剂"}
+            - 实时网络搜索 (Web Search):
+            {web_content if web_content else "- 暂无网络搜索结果"}
+            - 交易所新闻 (Exchange News): 
+            {news_headlines if news_headlines else "- 暂无交易所新闻"}
 
             # Analysis Requirements
             请基于以上数据，生成一份逻辑严密、具备实战指导意义的分析报告。要求：
@@ -215,11 +234,15 @@ async def analyze(ctx, ticker: str):
         await status_msg.edit(content=f"📈 正在计算 **{ticker}** 的技术指标与量化信号...")
         df_tech = StockAnalyzer.calculate_indicators(df)
         
-        # 3. 获取 AI 报告
-        await status_msg.edit(content=f"🤖 DeepSeek R1 (深度思考模式) 正在生成分析报告...")
-        report = await StockAnalyzer.get_ai_analysis(ticker, fund, df_tech, news)
+        # 3. 执行网络搜索 (在后台线程运行以防阻塞)
+        loop = asyncio.get_running_loop()
+        web_results = await loop.run_in_executor(None, lambda: StockAnalyzer.get_web_search(ticker))
 
-        # 4. 构建 Embed 消息
+        # 4. 获取 AI 报告
+        await status_msg.edit(content=f"🤖 DeepSeek R1 (深度思考模式) 正在生成分析报告...")
+        report = await StockAnalyzer.get_ai_analysis(ticker, fund, df_tech, news, web_results)
+
+        # 5. 构建 Embed 消息
         embed = discord.Embed(
             title=f"📑 {ticker} 深度投资分析报告",
             description=report,

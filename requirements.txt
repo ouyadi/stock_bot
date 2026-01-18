@@ -2,3 +2,4 @@ discord.py
 yfinance
 pandas
 openai
+duckduckgo-search
