@@ -19,6 +19,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.graphics.shapes import Drawing, Line
 from reportlab.lib import colors
 
 # ================= 配置区域 =================
@@ -429,7 +430,9 @@ class StockAnalyzer:
             t.setStyle(TableStyle([
                 ('FONTNAME', (0, 0), (-1, -1), 'STSong-Light'),
                 ('FONTSIZE', (0, 0), (-1, -1), 10),
-                ('TEXTCOLOR', (0, 0), (-1, -1), colors.HexColor("#3c4043")),
+                ('TEXTCOLOR', (0, 0), (-1, -1), colors.black), # 默认数值为黑色
+                ('TEXTCOLOR', (0, 0), (0, -1), colors.HexColor("#5f6368")), # 第一列标签灰色
+                ('TEXTCOLOR', (2, 0), (2, -1), colors.HexColor("#5f6368")), # 第三列标签灰色
                 ('BACKGROUND', (0, 0), (0, -1), colors.HexColor("#f1f3f4")), # 标签列背景色
                 ('BACKGROUND', (2, 0), (2, -1), colors.HexColor("#f1f3f4")),
                 ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#e0e0e0")), # 网格线
@@ -450,7 +453,7 @@ class StockAnalyzer:
                 if not line: continue
                 
                 # 简单 Markdown 转换: 加粗
-                line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line)
+                line = re.sub(r'\*\*(.*?)\*\*', r'<font color="#1a73e8"><b>\1</b></font>', line) # 加粗文字使用主题蓝，更醒目
                 # 处理代码块标记 (移除)
                 line = line.replace('```', '')
                 
@@ -463,6 +466,11 @@ class StockAnalyzer:
                     
                     if level == 1:
                         story.append(Paragraph(text, title_style))
+                        # === 优化: 在一级标题下添加分割线 ===
+                        d = Drawing(512, 1) # 宽度匹配页边距 (612 - 50 - 50 = 512)
+                        d.add(Line(0, 0, 512, 0, strokeColor=colors.HexColor("#1a73e8"), strokeWidth=1))
+                        story.append(d)
+                        story.append(Spacer(1, 8))
                     else:
                         story.append(Paragraph(text, heading_style))
                         
@@ -478,6 +486,11 @@ class StockAnalyzer:
                 else:
                     story.append(Paragraph(line, normal_style))
             
+            # 4. 添加文末免责声明板块
+            story.append(Spacer(1, 20))
+            disclaimer = "<b>免责声明 (Disclaimer):</b> 本报告由 AI 系统基于公开数据自动生成，仅供信息参考，不构成任何投资建议。市场有风险，投资需谨慎。请务必结合独立思考与专业顾问意见进行决策。"
+            story.append(Paragraph(disclaimer, ParagraphStyle('Disclaimer', parent=normal_style, fontSize=8, textColor=colors.grey, alignment=0)))
+
             # 添加页脚
             def add_footer(canvas, doc):
                 canvas.saveState()
