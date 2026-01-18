@@ -68,6 +68,8 @@ class StockAnalyzer:
                 "eps": info.get('trailingEps', 'N/A'),
                 "roe": info.get('returnOnEquity', 'N/A'),
                 "debt_to_equity": info.get('debtToEquity', 'N/A'),
+                "forward_pe": info.get('forwardPE', 'N/A'),
+                "beta": info.get('beta', 'N/A'),
             }
             
             news = stock.news
@@ -120,42 +122,58 @@ class StockAnalyzer:
 
         # 构建更强大的提示词 (Prompt)
         prompt = f"""
-        你是一位专业的华尔街量化与宏观对冲基金经理。请根据以下综合数据，深度分析股票 {ticker} ({fund['name']})。
+        # Role 定位
+        你是一位拥有20年经验的华尔街量化与宏观对冲基金首席投资官 (CIO)。你擅长将自上而下的宏观逻辑与自下而上的量化多因子分析相结合。
 
-        【基本面数据】
-        - 行业: {fund['sector']}
-        - 当前价格: {fund['price']} {fund['currency']}
-        - 市值: {fund['market_cap']}
-        - 市盈率 (P/E): {fund['pe']}
-        - 市净率 (P/B): {fund['pb']}
-        - 每股收益 (EPS): {fund['eps']}
-        - 净资产收益率 (ROE): {fund['roe']}
-        - 负债权益比: {fund['debt_to_equity']}
+        # 核心数据面板
+        【标的信息】
+        - 股票: {ticker} ({fund['name']}) | 行业: {fund['sector']}
+        - 价格/市值: {fund['price']} {fund['currency']} / {fund['market_cap']}
 
-        【量化分析】
-        - 30日年化波动率: {latest['Volatility']:.2%} (越高代表价格变动越剧烈)
+        【多因子基本面】
+        - 估值维度: P/E (TTM): {fund['pe']} | Forward P/E: {fund['forward_pe']} | P/B: {fund['pb']}
+        - 质量维度: ROE: {fund['roe']} | EPS: {fund['eps']} | 负债权益比: {fund['debt_to_equity']}
+        - 增长维度: [请根据行业背景评估其营收与利润增长动能]
 
-        【技术指标 (最新收盘)】
-        - RSI (14): {latest['RSI']:.2f} (RSI>70超买, <30超卖)
-        - 50日均线: {latest['SMA_50']:.2f}
-        - 200日均线: {latest['SMA_200']:.2f}
-        - MACD: {latest['MACD']:.2f} (信号线: {latest['MACD_Signal']:.2f})
-        - 布林带: 上轨 {latest['BB_Upper']:.2f}, 下轨 {latest['BB_Lower']:.2f}
-        - 长期趋势: 当前价格 {"高于" if latest['Close'] > latest['SMA_200'] else "低于"} 200日均线，呈{"上升" if latest['SMA_50'] > latest['SMA_200'] else "下降"}趋势。
+        【量化与波动特征】
+        - 30日年化波动率: {latest['Volatility']:.2%}
+        - 贝塔系数 (Beta): {fund['beta']}
 
-        【事件驱动 (近期新闻)】
-        {news_headlines if news_headlines else "- 暂无重要新闻"}
+        【技术面共振】
+        - 动能指标: RSI(14): {latest['RSI']:.2f} | MACD: {latest['MACD']:.2f} (信号线: {latest['MACD_Signal']:.2f})
+        - 均线结构: 50D SMA: {latest['SMA_50']:.2f} | 200D SMA: {latest['SMA_200']:.2f} (当前价格{"偏离" if abs(latest['Close']-latest['SMA_200'])/latest['SMA_200'] > 0.1 else "贴近"}长周期成本线)
+        - 波动区间: 布林带 ({latest['BB_Lower']:.2f} - {latest['BB_Upper']:.2f})
 
-        请生成一份专业、深刻的 Markdown 格式投资分析报告，包含以下部分：
-        1. **📈 综合评估与核心观点**: 结合基本面、技术面、量化指标和新闻，给出核心投资逻辑。
-        2. **🏢 基本面健康度**: 评估公司财务状况、估值是否合理，有无增长潜力。
-        3. **📉 量化与技术面分析**: 结合波动率、RSI、MACD和均线，判断市场情绪和趋势，给出关键技术位。
-        4. **📰 事件驱动因素**: 分析近期新闻可能对股价造成的影响。
-        5. **🎯 交易策略与风险**: 给出明确的操作建议（长线持有/波段做多/保持观望/逢高做空），并阐述主要风险点。
+        【市场情绪与驱动力】
+        - 近期新闻摘要: {news_headlines if news_headlines else "- 暂无显著负面/正面催化剂"}
+        - 宏观环境背景: [当前利率环境、行业监管政策、汇率变动]
 
-        请直接输出报告内容，展现你的专业性。
-        """
-        
+        # 任务要求：撰写深度投资分析报告
+        请生成一份严谨、具备实战指导意义的 Markdown 格式报告，包含：
+
+        ## 1. 💎 核心投资逻辑 (Investment Thesis)
+        不要罗列数据，请给出“一针见血”的判断。目前是估值修复、动能追涨还是价值陷阱？是否存在宏观叙事支持？
+
+        ## 2. 📊 财务质量与估值分位
+        - 对比行业平均水平，评估 {ticker} 的基本面防御性。
+        - 结合 ROE 和债务结构，分析其在当前高利率/低增长环境下的生存能力。
+
+        ## 3. 📉 量化特征与技术面博弈
+        - **趋势强度**: 分析均线系统是“多头排列”还是“均线缠绕”。
+        - **超买/超卖与背离**: RSI 是否与价格走势背离？MACD 金叉/死叉的含金量如何？
+        - **波动率挤压**: 根据布林带开口情况判断是否面临爆发性的方向选择。
+
+        ## 4. ⚡ 催化剂与风险溢价
+        - 深入分析近期新闻对资金流向的实际影响。
+        - 识别潜在的“黑天鹅”风险（如政策变动、财报暴雷点）。
+
+        ## 5. 🛠 机构级交易执行建议
+        - **评级**: (强力买入 / 逢低买入 / 持股观望 / 卖出)
+        - **策略结构**: 给出具体的 Entry (入场)、Target (目标价)、Stop-loss (止损位)。
+        - **仓位管理**: 建议配置权重 (如：轻仓试探、标准配置、进攻性配置)。
+
+        请直接输出报告内容，语言风格要求：专业、客观、不带情绪色彩，多使用金融专业术语。
+        """        
         try:
             loop = asyncio.get_running_loop()
             response = await loop.run_in_executor(None, lambda: client.models.generate_content(model=MODEL_ID, contents=prompt))
