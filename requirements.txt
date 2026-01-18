@@ -5,5 +5,3 @@ openai
 duckduckgo-search
 scipy
 reportlab
-requests
-beautifulsoup4
