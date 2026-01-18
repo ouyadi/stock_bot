@@ -468,10 +468,10 @@ class StockAnalyzer:
                 'CustomNormal', parent=styles['Normal'], fontName='STSong-Light', fontSize=10.5, leading=15, spaceAfter=6, textColor=colors.HexColor("#3c4043")
             )
             bullet_style = ParagraphStyle(
-                'CustomBullet', parent=normal_style, leftIndent=15, firstLineIndent=0, spaceAfter=4
+                'CustomBullet', parent=normal_style, leftIndent=15, firstLineIndent=0, spaceAfter=4, bulletFontName='STSong-Light'
             )
             sub_bullet_style = ParagraphStyle(
-                'CustomSubBullet', parent=normal_style, leftIndent=35, firstLineIndent=0, spaceAfter=4
+                'CustomSubBullet', parent=normal_style, leftIndent=35, firstLineIndent=0, spaceAfter=4, bulletFontName='STSong-Light'
             )
             
             story = []
@@ -542,8 +542,45 @@ class StockAnalyzer:
             
             # 5. 解析 Markdown 文本并转换为 PDF 元素
             def clean_text(text):
-                # 移除 Emoji 和非 BMP 字符，防止 STSong-Light 字体无法渲染导致的乱码
-                return "".join(c for c in text if c <= '\uFFFF')
+                # 1. 替换会导致乱码的特殊符号 (Smart Quotes, Dashes, Bullets)
+                replacements = {
+                    '\u2014': '-',  # Em Dash (—) -> 篳
+                    '\u2013': '-',  # En Dash (–)
+                    '\u2018': "'",  # Left Single Quote (‘)
+                    '\u2019': "'",  # Right Single Quote (’) -> 篳
+                    '\u201c': '"',  # Left Double Quote (“)
+                    '\u201d': '"',  # Right Double Quote (”)
+                    '\u2022': '-',  # Bullet (•)
+                    '\u25e6': '-',  # White Bullet (◦)
+                    '\u27a2': '->', # Arrow (➢) -> 縴
+                    '\u2026': '...', # Ellipsis (…)
+                }
+                for k, v in replacements.items():
+                    text = text.replace(k, v)
+                
+                # 2. 仅保留安全字符 (ASCII + 中文 + 常用标点)
+                # 过滤掉 Emoji 和其他生僻符号
+                return "".join(c for c in text if 
+                               (0x20 <= ord(c) <= 0x7E) or  # ASCII
+                               (0x4E00 <= ord(c) <= 0x9FFF) or # CJK Unified Ideographs
+                               (0x3000 <= ord(c) <= 0x303F) or # CJK Punctuation
+                               (0xFF00 <= ord(c) <= 0xFFEF) or # Fullwidth ASCII
+                               c in '\n\r\t')
+
+            def format_content(text):
+                # 1. 中英文之间增加空格 (Pangu Spacing)
+                text = re.sub(r'([\u4e00-\u9fa5])([A-Za-z0-9])', r'\1 \2', text)
+                text = re.sub(r'([A-Za-z0-9])([\u4e00-\u9fa5])', r'\1 \2', text)
+                
+                # 2. 将 ASCII 字符 (英文/数字/标点) 包裹在 Helvetica 字体中，解决 STSong-Light 英文挤压问题
+                # 排除 * (用于加粗) 和 < > (用于标签)
+                def repl(match):
+                    return f'<font name="Helvetica">{match.group(1)}</font>'
+                text = re.sub(r'([A-Za-z0-9\.\,\%\$\-\+\:\/\=\(\)\?\!]+)', repl, text)
+                
+                # 3. 处理加粗 (**Text** -> <b>Text</b>)
+                text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
+                return text
 
             lines = report_text.split('\n')
             for line in lines:
@@ -553,10 +590,6 @@ class StockAnalyzer:
                 
                 line = line.strip()
                 if not line: continue
-                
-                # 简单 Markdown 转换: 加粗
-                line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line)
-                # 处理代码块标记 (移除)
                 line = line.replace('```', '')
                 
                 if line.startswith('#'):
@@ -564,7 +597,11 @@ class StockAnalyzer:
                     level = line.count('#')
                     text = line.lstrip('#').strip()
                     # 使用 Regex 在数字编号(如 "1.")后添加不换行空格，增加间距
-                    text = re.sub(r'^(\d+\.)\s*', r'\1&nbsp;&nbsp;', text)
+                    # 使用 \u00A0 防止被 format_content 破坏
+                    text = re.sub(r'^(\d+\.)\s*', r'\1\u00A0\u00A0', text)
+                    
+                    # 格式化内容
+                    text = format_content(text)
                     
                     if level == 1:
                         story.append(Paragraph(text, title_style))
@@ -581,14 +618,17 @@ class StockAnalyzer:
                         
                 elif line.startswith('- ') or line.startswith('* '):
                     content = line[2:]
+                    content = format_content(content)
                     # 策略部分优化：如果是风控参数相关的行，强制缩进
-                    is_strategy_param = re.match(r'^(入场|止盈|止损|仓位|Entry|TP|SL)', content)
+                    # 注意：content 现在可能包含 <font> 标签，正则需要适配
+                    is_strategy_param = re.search(r'(入场|止盈|止损|仓位|Entry|TP|SL)', content)
                     
                     if is_indented or is_strategy_param:
-                        story.append(Paragraph(f"◦&nbsp; {content}", sub_bullet_style))
+                        story.append(Paragraph(f"  {content}", sub_bullet_style)) # 移除特殊符号 ◦
                     else:
-                        story.append(Paragraph(f"•&nbsp; {content}", bullet_style))
+                        story.append(Paragraph(f"-&nbsp; {content}", bullet_style)) # 将 • 替换为安全的 -
                 else:
+                    line = format_content(line)
                     story.append(Paragraph(line, normal_style))
             
             # 4. 添加文末免责声明板块
