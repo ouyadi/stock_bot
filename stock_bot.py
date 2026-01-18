@@ -18,7 +18,7 @@ DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
 
 # 配置 DeepSeek AI
 client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
-MODEL_ID = 'deepseek-chat'
+MODEL_ID = 'deepseek-reasoner'
 
 # 配置 Discord Bot
 intents = discord.Intents.default()
@@ -216,7 +216,7 @@ async def analyze(ctx, ticker: str):
         df_tech = StockAnalyzer.calculate_indicators(df)
         
         # 3. 获取 AI 报告
-        await status_msg.edit(content=f"🤖 DeepSeek AI 正在生成深度分析报告...")
+        await status_msg.edit(content=f"🤖 DeepSeek R1 (深度思考模式) 正在生成分析报告...")
         report = await StockAnalyzer.get_ai_analysis(ticker, fund, df_tech, news)
 
         # 4. 构建 Embed 消息
