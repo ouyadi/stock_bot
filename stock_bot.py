@@ -28,7 +28,7 @@ import json
 import time
 from supabase import create_client, Client
 import uvicorn
-from fastapi import FastAPI, Form, File, UploadFile, HTTPException, Body
+from fastapi import FastAPI, Form, File, UploadFile, HTTPException, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
@@ -180,11 +180,43 @@ class CloudmailinPayload(BaseModel):
     attachments: List[CloudmailinAttachment] = []
 
 @app.post("/email-report")
-async def handle_email_report(payload: CloudmailinPayload):
+async def handle_email_report(request: Request):
     """
     接收来自 CloudMailIn 的邮件 POST 请求，进行处理和转发。
     """
     print("📧 收到来自 CloudMailIn 的新邮件...")
+    
+    # 解析 Multipart Form Data (CloudMailIn 使用 multipart/form-data 发送)
+    try:
+        form = await request.form()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Form parsing error: {e}")
+
+    # 手动构建 Payload 对象
+    plain = form.get("plain")
+    html = form.get("html")
+    subject = form.get("headers[subject]") or form.get("subject") or "无主题"
+    
+    attachments_list = []
+    for key, value in form.multi_items():
+        if isinstance(value, UploadFile):
+            content = await value.read()
+            if content:
+                b64_content = base64.b64encode(content).decode('utf-8')
+                attachments_list.append(CloudmailinAttachment(
+                    file_name=value.filename or "unknown",
+                    content_type=value.content_type or "application/octet-stream",
+                    content=b64_content,
+                    size=len(content)
+                ))
+    
+    payload = CloudmailinPayload(
+        plain=str(plain) if plain else None,
+        html=str(html) if html else None,
+        subject=str(subject),
+        attachments=attachments_list
+    )
+
     analysis_content = ""
     source = ""
 
