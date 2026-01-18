@@ -29,6 +29,7 @@ import time
 from supabase import create_client, Client
 import uvicorn
 from fastapi import FastAPI, Form, File, UploadFile, HTTPException, Body
+from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 import base64
@@ -62,6 +63,15 @@ if SUPABASE_URL and SUPABASE_KEY:
 
 # 配置 FastAPI
 app = FastAPI()
+
+# 配置 CORS (允许前端跨域调用)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 允许所有来源，生产环境建议限制为前端域名
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ================= 投研报告处理模块 =================
 
@@ -255,6 +265,31 @@ async def handle_email_report(payload: CloudmailinPayload):
     except Exception as e:
         print(f"处理邮件时发生严重错误: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+class AnalyzeRequest(BaseModel):
+    ticker: str
+
+@app.post("/analyze")
+async def api_analyze(request: AnalyzeRequest):
+    """Web API: 分析股票接口"""
+    print(f"🌍 收到 Web API 分析请求: {request.ticker}")
+    
+    loop = asyncio.get_running_loop()
+    # 在线程池中运行同步的分析流程，避免阻塞主线程
+    pdf_buffer, report = await loop.run_in_executor(
+        None, 
+        lambda: StockAnalyzer.run_full_analysis_pipeline(request.ticker)
+    )
+    
+    if not report:
+        raise HTTPException(status_code=404, detail="Analysis failed or ticker not found")
+
+    # 上传 PDF 到 Supabase (如果配置了)
+    pdf_url = None
+    if pdf_buffer and supabase:
+        pdf_url = await loop.run_in_executor(None, lambda: StockAnalyzer.upload_to_supabase(request.ticker, pdf_buffer))
+
+    return {"status": "success", "ticker": request.ticker, "report": report, "pdf_url": pdf_url}
 
 @app.get("/")
 def health_check():
