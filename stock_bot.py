@@ -457,10 +457,12 @@ class StockAnalyzer:
             
             # === 自定义样式优化 ===
             title_style = ParagraphStyle(
-                'CustomTitle', parent=styles['Title'], fontName='STSong-Light', fontSize=24, leading=28, spaceAfter=10, alignment=1, textColor=colors.HexColor("#1a73e8")
+                'CustomTitle', parent=styles['Title'], fontName='STSong-Light', fontSize=24, leading=28, spaceAfter=10, alignment=1, textColor=colors.HexColor("#1a73e8"),
+                keepWithNext=True # 确保标题不与后续内容分页
             )
             heading_style = ParagraphStyle(
-                'CustomHeading', parent=styles['Heading2'], fontName='STSong-Light', fontSize=15, leading=18, spaceBefore=15, spaceAfter=8, textColor=colors.HexColor("#202124")
+                'CustomHeading', parent=styles['Heading2'], fontName='STSong-Light', fontSize=15, leading=18, spaceBefore=15, spaceAfter=8, textColor=colors.HexColor("#202124"),
+                keepWithNext=True # 确保标题不与后续内容分页
             )
             normal_style = ParagraphStyle(
                 'CustomNormal', parent=styles['Normal'], fontName='STSong-Light', fontSize=10.5, leading=15, spaceAfter=6, textColor=colors.HexColor("#3c4043")
@@ -564,8 +566,11 @@ class StockAnalyzer:
                         # === 优化: 在一级标题下添加分割线 ===
                         d = Drawing(512, 1) # 宽度匹配页边距 (612 - 50 - 50 = 512)
                         d.add(Line(0, 0, 512, 0, strokeColor=colors.HexColor("#1a73e8"), strokeWidth=1))
+                        d.keepWithNext = True # 确保分割线紧贴下一元素
                         story.append(d)
-                        story.append(Spacer(1, 8))
+                        s = Spacer(1, 8)
+                        s.keepWithNext = True # 确保间隔紧贴下一元素 (正文)
+                        story.append(s)
                     else:
                         story.append(Paragraph(text, heading_style))
                         
