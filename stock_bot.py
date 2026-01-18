@@ -35,6 +35,12 @@ from pydantic import BaseModel, Field
 import base64
 from lxml import html as lxml_html
 import PyPDF2
+try:
+    from PIL import Image as PILImage
+    import pytesseract
+except ImportError:
+    PILImage = None
+    pytesseract = None
 
 # ================= 配置区域 =================
 # 建议使用环境变量，或者直接在此处填入 Key
@@ -287,11 +293,27 @@ async def handle_email_report(request: Request):
 
         # --- 处理图片附件 ---
         image_attachments = [a for a in payload.attachments if "image" in a.content_type]
-        if image_attachments:
-            img_names = [a.file_name for a in image_attachments]
-            print(f"🖼️ 发现图片附件: {img_names}")
-            parts.append(f"=== 图片附件 ===\n[系统提示: 邮件包含 {len(image_attachments)} 张图片附件 ({', '.join(img_names)})，当前模型无法直接查看图片内容]")
-            sources.append(f"图片:{len(image_attachments)}张")
+        for img in image_attachments:
+            if PILImage and pytesseract:
+                try:
+                    print(f"🖼️ 正在OCR识别图片: {img.file_name}")
+                    img_content = base64.b64decode(img.content)
+                    image = PILImage.open(io.BytesIO(img_content))
+                    
+                    # 尝试识别中文和英文，如果失败则回退到默认语言
+                    try:
+                        text = pytesseract.image_to_string(image, lang='chi_sim+eng')
+                    except Exception:
+                        text = pytesseract.image_to_string(image)
+                    
+                    if text.strip():
+                        parts.append(f"=== 图片附件 ({img.file_name}) OCR内容 ===\n{text}")
+                        sources.append(f"OCR:{img.file_name}")
+                except Exception as e:
+                    print(f"OCR Error ({img.file_name}): {e}")
+            else:
+                parts.append(f"=== 图片附件 ({img.file_name}) ===\n[服务器未安装 OCR 库，无法提取文字]")
+                if "图片(未OCR)" not in sources: sources.append("图片(未OCR)")
 
         if not parts:
             raise HTTPException(status_code=400, detail="邮件内容为空")
