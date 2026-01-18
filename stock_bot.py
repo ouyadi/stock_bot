@@ -10,6 +10,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 import socket
 from duckduckgo_search import DDGS
+from scipy.stats import norm
+import datetime
 
 # ================= 配置区域 =================
 # 建议使用环境变量，或者直接在此处填入 Key
@@ -75,6 +77,30 @@ class StockAnalyzer:
                 "profit_margins": info.get('profitMargins', 'N/A'),
                 "short_percent": info.get('shortPercentOfFloat', 'N/A'),
             }
+
+            # === 获取期权数据 (Put/Call Ratio) ===
+            try:
+                exps = stock.options
+                if exps:
+                    # 获取最近的一个到期日
+                    nearest_exp = exps[0]
+                    opt = stock.option_chain(nearest_exp)
+                    
+                    # 计算总成交量和持仓量
+                    c_vol = opt.calls['volume'].sum() if not opt.calls.empty else 0
+                    p_vol = opt.puts['volume'].sum() if not opt.puts.empty else 0
+                    c_oi = opt.calls['openInterest'].sum() if not opt.calls.empty else 0
+                    p_oi = opt.puts['openInterest'].sum() if not opt.puts.empty else 0
+
+                    fundamentals['pc_ratio_vol'] = round(p_vol / c_vol, 2) if c_vol > 0 else 'N/A'
+                    fundamentals['pc_ratio_oi'] = round(p_oi / c_oi, 2) if c_oi > 0 else 'N/A'
+                    fundamentals['options_expiry'] = nearest_exp
+                else:
+                    raise ValueError("No options")
+            except Exception:
+                fundamentals['pc_ratio_vol'] = 'N/A'
+                fundamentals['pc_ratio_oi'] = 'N/A'
+                fundamentals['options_expiry'] = 'N/A'
             
             news = stock.news
             return df, fundamentals, news
@@ -130,7 +156,65 @@ class StockAnalyzer:
             return []
 
     @staticmethod
-    async def get_ai_analysis(ticker, fund, tech_data, news_data, web_search_data):
+    def black_scholes_gamma(S, K, T, r, sigma):
+        """计算 Black-Scholes Gamma"""
+        try:
+            if T <= 0 or sigma <= 0:
+                return 0
+            d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+            gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
+            return gamma
+        except:
+            return 0
+
+    @staticmethod
+    def get_gamma_exposure(stock, current_price):
+        """计算 Gamma Exposure (GEX) 和关键挤压位置"""
+        try:
+            exps = stock.options
+            if not exps:
+                return None
+            
+            # 使用最近的到期日 (Gamma 风险最大)
+            expiry_date_str = exps[0]
+            expiry_date = datetime.datetime.strptime(expiry_date_str, "%Y-%m-%d").date()
+            today = datetime.date.today()
+            T = (expiry_date - today).days / 365.0
+            if T <= 1e-5: T = 1/365.0 # 防止除以零
+
+            opt = stock.option_chain(expiry_date_str)
+            calls = opt.calls.copy()
+            puts = opt.puts.copy()
+            
+            r = 0.045 # 假设无风险利率 4.5%
+            
+            # 计算 Gamma
+            calls['gamma'] = calls.apply(lambda x: StockAnalyzer.black_scholes_gamma(current_price, x['strike'], T, r, x['impliedVolatility']), axis=1)
+            puts['gamma'] = puts.apply(lambda x: StockAnalyzer.black_scholes_gamma(current_price, x['strike'], T, r, x['impliedVolatility']), axis=1)
+
+            # 计算 GEX (名义价值) = Gamma * OI * 100 * Price
+            # Call GEX 通常视为正向 (Dealer Short Call -> Long Stock to hedge)
+            # Put GEX 通常视为负向 (Dealer Short Put -> Short Stock to hedge)
+            calls['gex'] = calls['gamma'] * calls['openInterest'] * 100 * current_price
+            puts['gex'] = puts['gamma'] * puts['openInterest'] * 100 * current_price * -1
+
+            # 寻找关键墙 (Walls)
+            call_wall = calls.loc[calls['gex'].idxmax()]['strike'] if not calls.empty else 0
+            put_wall = puts.loc[puts['gex'].abs().idxmax()]['strike'] if not puts.empty else 0
+            net_gex = calls['gex'].sum() + puts['gex'].sum()
+
+            return {
+                "expiry": expiry_date_str,
+                "call_wall": call_wall,
+                "put_wall": put_wall,
+                "net_gex": net_gex
+            }
+        except Exception as e:
+            print(f"GEX Error: {e}")
+            return None
+
+    @staticmethod
+    async def get_ai_analysis(ticker, fund, tech_data, news_data, web_search_data, gex_data):
         """调用 LLM 生成更深度的自然语言报告"""
         latest = tech_data.iloc[-1]
 
@@ -139,6 +223,14 @@ class StockAnalyzer:
         
         # 格式化网络搜索结果
         web_content = "\n".join([f"- [Web] {r['title']}: {r['body']}" for r in web_search_data])
+
+        # 格式化 GEX 数据
+        gex_info = "- 暂无期权 Gamma 数据"
+        if gex_data:
+            gex_info = f"""- 到期日: {gex_data['expiry']}
+            - Net GEX (净伽马敞口): ${gex_data['net_gex']:,.0f}
+            - Call Wall (最大阻力/做市商做空点): {gex_data['call_wall']}
+            - Put Wall (最大支撑/做市商回补点): {gex_data['put_wall']}"""
 
         # 构建更强大的提示词 (Prompt)
         prompt = f"""
@@ -158,8 +250,13 @@ class StockAnalyzer:
             - 波动率: 30日年化波动率: {latest['Volatility']:.2%}
             - 布林带位置: Upper: {latest['BB_Upper']:.2f} | Lower: {latest['BB_Lower']:.2f} | Close: {latest['Close']:.2f}
 
-            ## 3. 市场催化剂 (Catalysts)
+            ## 3. 衍生品与情绪 (Derivatives & Sentiment)
+            - 期权 Put/Call Ratio (Volume): {fund['pc_ratio_vol']} (基于最近到期日 {fund['options_expiry']})
+            - 期权 Put/Call Ratio (Open Interest): {fund['pc_ratio_oi']}
             - 空头流通占比 (Short Float): {fund['short_percent']}
+            {gex_info}
+
+            ## 4. 市场催化剂 (Catalysts)
             - 实时网络搜索 (Web Search):
             {web_content if web_content else "- 暂无网络搜索结果"}
             - 交易所新闻 (Exchange News): 
@@ -174,6 +271,12 @@ class StockAnalyzer:
             ### 2. 📊 因子深度分析
             - **估值与预期**: 结合 P/E 和 Forward P/E，判断市场当前的预期是否过高或过低。
             - **基本面质量**: 评估 ROE 和负债水平，判断公司的护城河与抗风险能力。
+            - **期权博弈与 Gamma Squeeze**: 
+                1. 分析 P/C Ratio 判断情绪。
+                2. **重点分析 Gamma 数据**: 
+                   - 如果当前价格接近 **Call Wall**，是否存在向上突破引发 Gamma Squeeze (逼空) 的可能？
+                   - 如果 Net GEX 为负，说明做市商处于 Short Gamma 状态，市场波动率是否会放大？
+                   - Put Wall 是否提供了有效支撑？
 
             ### 3. 📈 技术面共振
             - 分析 50D/200D 均线的排列关系（金叉/死叉）。
@@ -238,11 +341,15 @@ async def analyze(ctx, ticker: str):
         loop = asyncio.get_running_loop()
         web_results = await loop.run_in_executor(None, lambda: StockAnalyzer.get_web_search(ticker))
 
-        # 4. 获取 AI 报告
-        await status_msg.edit(content=f"🤖 DeepSeek R1 (深度思考模式) 正在生成分析报告...")
-        report = await StockAnalyzer.get_ai_analysis(ticker, fund, df_tech, news, web_results)
+        # 4. 计算 Gamma Exposure (GEX)
+        await status_msg.edit(content=f"🧮 正在计算 **{ticker}** 的 Gamma Exposure (GEX) 与挤压风险...")
+        gex_data = await loop.run_in_executor(None, lambda: StockAnalyzer.get_gamma_exposure(StockAnalyzer.get_data(ticker)[0].parent if hasattr(StockAnalyzer.get_data(ticker)[0], 'parent') else yf.Ticker(ticker), fund['price']))
 
-        # 5. 构建 Embed 消息
+        # 5. 获取 AI 报告
+        await status_msg.edit(content=f"🤖 DeepSeek R1 (深度思考模式) 正在生成分析报告...")
+        report = await StockAnalyzer.get_ai_analysis(ticker, fund, df_tech, news, web_results, gex_data)
+
+        # 6. 构建 Embed 消息
         embed = discord.Embed(
             title=f"📑 {ticker} 深度投资分析报告",
             description=report,
@@ -255,6 +362,10 @@ async def analyze(ctx, ticker: str):
         embed.add_field(name="P/B 估值", value=f"{fund['pb']}", inline=True)
         embed.add_field(name="RSI (14)", value=f"{latest['RSI']:.1f}", inline=True)
         embed.add_field(name="波动率", value=f"{latest['Volatility']:.2%}", inline=True)
+        embed.add_field(name="P/C Ratio (Vol)", value=f"{fund['pc_ratio_vol']}", inline=True)
+        if gex_data:
+            embed.add_field(name="Call Wall (阻力)", value=f"{gex_data['call_wall']}", inline=True)
+            embed.add_field(name="Put Wall (支撑)", value=f"{gex_data['put_wall']}", inline=True)
         embed.add_field(name="趋势 (50/200)", value=f'{"金叉" if latest["SMA_50"] > latest["SMA_200"] else "死叉"}', inline=True)
 
         embed.set_footer(text=f"分析对象: {fund['name']} | Host: {socket.gethostname()} | 由 DeepSeek AI 强力驱动")
