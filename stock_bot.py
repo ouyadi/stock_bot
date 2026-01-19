@@ -1042,6 +1042,9 @@ class StockAnalyzer:
             if oi_chart_buffer:
                 img = Image(oi_chart_buffer, width=480, height=180)
                 story.append(img)
+                # 添加图表说明
+                oi_desc = "<b>图表说明:</b> 绿色=Call持仓(潜在阻力), 红色=Put持仓(潜在支撑), 蓝色虚线=当前股价. 最高的柱子通常代表关键的市场博弈点位(Walls)."
+                story.append(Paragraph(oi_desc, ParagraphStyle('OIDesc', parent=normal_style, fontSize=9, textColor=colors.grey, alignment=1, spaceBefore=5)))
                 story.append(Spacer(1, 20))
             
             # 5. 解析 Markdown 文本并转换为 PDF 元素
