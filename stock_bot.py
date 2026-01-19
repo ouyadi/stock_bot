@@ -466,7 +466,7 @@ async def api_analyze(request: AnalyzeRequest):
     
     loop = asyncio.get_running_loop()
     # 在线程池中运行同步的分析流程，避免阻塞主线程
-    pdf_buffer, report = await loop.run_in_executor(
+    pdf_buffer, report, oi_chart_url = await loop.run_in_executor(
         None, 
         lambda: StockAnalyzer.run_full_analysis_pipeline(request.ticker)
     )
@@ -477,9 +477,10 @@ async def api_analyze(request: AnalyzeRequest):
     # 上传 PDF 到 Supabase (如果配置了)
     pdf_url = None
     if pdf_buffer and supabase:
-        pdf_url = await loop.run_in_executor(None, lambda: StockAnalyzer.upload_to_supabase(request.ticker, pdf_buffer))
+        pdf_filename = f"{request.ticker}_{int(time.time())}.pdf"
+        pdf_url = await loop.run_in_executor(None, lambda: StockAnalyzer.upload_file_to_supabase(pdf_filename, pdf_buffer, "application/pdf"))
 
-    return {"status": "success", "ticker": request.ticker, "report": report, "pdf_url": pdf_url}
+    return {"status": "success", "ticker": request.ticker, "report": report, "pdf_url": pdf_url, "oi_chart_url": oi_chart_url}
 
 @app.get("/")
 def health_check():
@@ -500,7 +501,7 @@ class StockAnalyzer:
 
             # 1. 获取数据
             df, fund, news = StockAnalyzer.get_data(ticker)
-            if df is None: return None, None
+            if df is None: return None, None, None
 
             # 2. 计算指标
             df_tech = StockAnalyzer.calculate_indicators(df)
@@ -515,25 +516,41 @@ class StockAnalyzer:
             gex_data = StockAnalyzer.get_gamma_exposure(stock_obj, fund['price'])
             flow_data = StockAnalyzer.get_option_flow(stock_obj, fund['price'])
             oi_chart_buffer = StockAnalyzer.get_option_open_interest_chart(stock_obj, fund['price'])
+            
+            # 上传 OI 图表
+            oi_chart_url = None
+            if oi_chart_buffer and supabase:
+                oi_chart_filename = f"{ticker}_oi_chart_{int(time.time())}.png"
+                oi_chart_url = StockAnalyzer.upload_file_to_supabase(oi_chart_filename, oi_chart_buffer, "image/png")
 
             # 4. AI 生成
             report = StockAnalyzer._generate_ai_report_sync(ticker, fund, df_tech, news, web_results, gex_data, flow_data)
 
             # 5. PDF 生成
             pdf_buffer = StockAnalyzer.create_pdf_report(ticker, report, fund, latest, price_change, oi_chart_buffer)
-            return pdf_buffer, report
+            return pdf_buffer, report, oi_chart_url
         except Exception as e:
             print(f"Pipeline Error: {e}")
-            return None, None
+            return None, None, None
 
     @staticmethod
-    def upload_to_supabase(ticker, pdf_buffer):
-        """上传 PDF 到 Supabase Storage 并返回公开链接"""
-        if not supabase: return "Supabase not configured"
-        filename = f"{ticker}_{int(time.time())}.pdf"
-        path = f"{filename}" # 可以根据需要加文件夹前缀
-        res = supabase.storage.from_(SUPABASE_BUCKET).upload(file=pdf_buffer.getvalue(), path=path, file_options={"content-type": "application/pdf"})
-        return supabase.storage.from_(SUPABASE_BUCKET).get_public_url(path)
+    def upload_file_to_supabase(filename: str, buffer: io.BytesIO, content_type: str) -> Optional[str]:
+        """通用文件上传到 Supabase Storage 并返回公开链接"""
+        if not supabase:
+            print("Supabase not configured, skipping upload.")
+            return None
+        try:
+            path = f"{filename}"
+            # 使用 getvalue() 来获取全部内容，避免移动 buffer 的指针
+            supabase.storage.from_(SUPABASE_BUCKET).upload(
+                file=buffer.getvalue(),
+                path=path,
+                file_options={"content-type": content_type}
+            )
+            return supabase.storage.from_(SUPABASE_BUCKET).get_public_url(path)
+        except Exception as e:
+            print(f"Supabase upload error for {filename}: {e}")
+            return None
 
     @staticmethod
     def get_data(ticker_symbol):
@@ -1366,6 +1383,12 @@ async def analyze(ctx, ticker: str):
         # 7. 生成期权 OI 图表
         oi_chart_buffer = await loop.run_in_executor(None, lambda: StockAnalyzer.get_option_open_interest_chart(stock_obj, fund['price']))
 
+        # 新增: 上传图表到 Supabase 以获取 URL
+        oi_chart_url = None
+        if oi_chart_buffer and supabase:
+            oi_chart_filename = f"{ticker}_oi_chart_{int(time.time())}.png"
+            oi_chart_url = await loop.run_in_executor(None, lambda: StockAnalyzer.upload_file_to_supabase(oi_chart_filename, oi_chart_buffer, "image/png"))
+
         # 8. 获取 AI 报告
         await status_msg.edit(content=f"🤖 DeepSeek R1 (深度思考模式) 正在生成分析报告...")
         report = await StockAnalyzer.get_ai_analysis(ticker, fund, df_tech, news, web_results, gex_data, flow_data)
@@ -1391,6 +1414,10 @@ async def analyze(ctx, ticker: str):
             top_flow = flow_data[0]
             embed.add_field(name="最大异动", value=f"{top_flow['type']} {top_flow['strike']} (Vol:{top_flow['volume']})", inline=True)
         embed.add_field(name="趋势 (50/200)", value=f'{"金叉" if latest["SMA_50"] > latest["SMA_200"] else "死叉"}', inline=True)
+
+        # 将 OI 图表直接嵌入消息
+        if oi_chart_url:
+            embed.set_image(url=oi_chart_url)
 
         embed.set_footer(text=f"分析对象: {fund['name']} | Host: {socket.gethostname()} | 由 DeepSeek AI 强力驱动")
         embed.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/8569/8569731.png") # 一个中性的图表icon
