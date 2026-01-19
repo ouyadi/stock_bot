@@ -1283,8 +1283,8 @@ class StockAnalyzer:
             - **核心逻辑摘要**: 一句话概括为何做此交易。
 
             ### 2. 🏛️ 宏观叙事与基本面 (Macro & Fundamentals)
-            - **宏观环境**: 结合大盘走势 ({macro_data.get('market_index', 'Market')}) 和 VIX 恐慌指数，判断当前市场是 Risk-On 还是 Risk-Off。
-            - **板块趋势**: 分析所属板块 ({fund['sector']}) 的整体表现。
+            - **宏观环境**: 结合大盘走势和 VIX 恐慌指数，判断当前市场是 Risk-On 还是 Risk-Off。
+            - **板块趋势**: 分析所属板块的整体表现。
             - **AI/FSD/增长故事**: 结合业务指引和行业趋势，分析核心增长逻辑。
             - **估值逻辑**: P/E 是否合理？结合 PEG 和历史分位判断。
 
