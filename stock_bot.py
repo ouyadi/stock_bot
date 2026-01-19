@@ -121,6 +121,14 @@ class ResearchAnalyzer:
                     stream=False
                 )
             )
+            usage = response.usage
+            if usage:
+                prompt_tokens = usage.prompt_tokens
+                cache_hit = getattr(usage, 'prompt_cache_hit_tokens', 0)
+                cache_miss = getattr(usage, 'prompt_cache_miss_tokens', 0)
+                hit_rate = (cache_hit / prompt_tokens * 100) if prompt_tokens > 0 else 0
+                print(f"📊 DeepSeek Usage [Email Summary]: Prompt: {prompt_tokens}, Cache Hit: {cache_hit} ({hit_rate:.2f}%), Miss: {cache_miss}")
+
             return response.choices[0].message.content
         except Exception as e:
             print(f"DeepSeek Error: {e}")
@@ -513,9 +521,17 @@ class StockAnalyzer:
             # 3. 外部数据获取
             web_results = StockAnalyzer.get_web_search(ticker)
             stock_obj = yf.Ticker(ticker)
-            gex_data = StockAnalyzer.get_gamma_exposure(stock_obj, fund['price'])
-            flow_data = StockAnalyzer.get_option_flow(stock_obj, fund['price'])
-            oi_chart_buffer = StockAnalyzer.get_option_open_interest_chart(stock_obj, fund['price'])
+            
+            # 判断是否为 A 股
+            is_ashare = ticker.endswith(('.SS', '.SZ', '.BJ'))
+            
+            gex_data = None
+            flow_data = []
+            oi_chart_buffer = None
+            if not is_ashare:
+                gex_data = StockAnalyzer.get_gamma_exposure(stock_obj, fund['price'])
+                flow_data = StockAnalyzer.get_option_flow(stock_obj, fund['price'])
+                oi_chart_buffer = StockAnalyzer.get_option_open_interest_chart(stock_obj, fund['price'])
             
             # 上传 OI 图表
             oi_chart_url = None
@@ -762,6 +778,18 @@ class StockAnalyzer:
         # 5. 波动率 (30日历史波动率)
         df['Log_Ret'] = df['Close'].apply(lambda x: np.log(x)).diff()
         df['Volatility'] = df['Log_Ret'].rolling(window=30).std() * np.sqrt(252) # 年化
+
+        # 7. 量价分析 (VPA)
+        # OBV (能量潮)
+        df['OBV'] = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
+        
+        # RVOL (相对成交量) - 衡量当日活跃度
+        df['Vol_SMA_20'] = df['Volume'].rolling(window=20).mean()
+        df['RVOL'] = df['Volume'] / df['Vol_SMA_20']
+        
+        # VWAP (成交量加权平均价) - 机构成本参考
+        tp = (df['High'] + df['Low'] + df['Close']) / 3
+        df['VWAP'] = (tp * df['Volume']).cumsum() / df['Volume'].cumsum()
 
         return df
 
@@ -1260,6 +1288,53 @@ class StockAnalyzer:
         vix_change = macro_data.get('vix_change')
         vix_change_str = f"{vix_change:+.2%}" if isinstance(vix_change, (int, float)) else "N/A"
 
+        # === 动态构建 Prompt 模块 (区分 A 股与美股) ===
+        is_ashare = ticker.endswith(('.SS', '.SZ', '.BJ'))
+        
+        if is_ashare:
+            # A 股特定分析要求
+            micro_requirements = """
+            ### 3. 🔬 微观筹码与量价博弈 (Micro, VPA & Volatility)
+            - **量价结构 (VPA)**: 结合 RVOL (相对成交量) 与价格形态，分析是放量突破、缩量回调还是量价背离？
+            - **资金性质**: 结合 OBV (能量潮) 与 换手率，判断主力是在隐蔽吸筹、洗盘还是拉高出货？
+            - **波动率分析**: 结合历史波动率 (Volatility) 与 ATR，判断当前是否处于变盘节点？
+            - **交易员情绪**: 结合社交媒体情绪，判断市场是否过热或恐慌。
+            - **特别提示**: 由于 A 股缺乏个股期权，请重点通过量价关系捕捉主力资金异动。
+            """
+            # A 股特定数据输入 (替代衍生品板块)
+            derivatives_input = f"""
+            ## 3. 量价与波动率深度分析 (VPA & Volatility - A-Share Focus)
+            - 相对成交量 (RVOL): {latest['RVOL']:.2f}x ( >1.5 视为显著放量)
+            - 换手率: {fund.get('turnover_rate', 'N/A')}
+            - 能量潮 (OBV): {latest['OBV']:.0f}
+            - 历史波动率 (30D): {latest['Volatility']:.2%}
+            - 平均真实波幅 (ATR): {latest['ATR']:.2f}
+            - 备注: A 股无个股期权数据，重点关注上述量价指标。
+            """
+            smart_money_input = "" # A股无期权流数据
+        else:
+            # 美股/通用分析要求
+            micro_requirements = """
+            ### 3. 🔬 微观筹码、量价与期权博弈 (Micro, VPA & Chips)
+            - **量价结构 (VPA)**: 结合 RVOL 与价格形态，分析是放量突破、缩量回调还是量价背离？
+            - **资金性质**: 结合期权异动 (Option Flow) 与 OBV 趋势，判断主力是在隐蔽吸筹、洗盘还是拉高出货？
+            - **Gamma Squeeze 风险**: 分析 Call Wall/Put Wall 位置，判断是否存在逼空或杀跌动能。
+            - **资金流向 (Smart Money)**: 解读期权异动 (Option Flow)，主力是在布局反弹还是对冲风险？
+            - **交易员情绪**: 结合社交媒体情绪，判断市场是否过热或恐慌。
+            """
+            derivatives_input = f"""
+            ## 3. 衍生品与情绪 (Derivatives & Sentiment)
+            - 期权 Put/Call Ratio (Volume): {fund['pc_ratio_vol']} (基于最近到期日 {fund['options_expiry']})
+            - 期权 Put/Call Ratio (Open Interest): {fund['pc_ratio_oi']}
+            - 空头流通占比 (Short Float): {fund['short_percent']}
+            {gex_info}
+            """
+            smart_money_input = f"""
+            ## 4. 资金流向与聪明钱 (Smart Money Flow)
+            - 异常期权异动 (Unusual Whales - Vol > OI):
+            {flow_info}
+            """
+
         # 构建更强大的提示词 (Prompt)
         prompt = f"""
             # Role
@@ -1289,6 +1364,9 @@ class StockAnalyzer:
             - **估值逻辑**: P/E 是否合理？结合 PEG 和历史分位判断。
 
             ### 3. 🔬 微观筹码与期权博弈 (Micro & Chips)
+            ### 3. 🔬 微观筹码、量价与期权博弈 (Micro, VPA & Chips)
+            - **量价结构 (VPA)**: 结合 RVOL 与价格形态，分析是放量突破、缩量回调还是量价背离？
+            - **资金性质**: 结合期权异动 (Option Flow) 与 OBV 趋势，判断主力是在隐蔽吸筹、洗盘还是拉高出货？
             - **Gamma Squeeze 风险**: 分析 Call Wall/Put Wall 位置，判断是否存在逼空或杀跌动能。
             - **资金流向 (Smart Money)**: 解读期权异动 (Option Flow)，主力是在布局反弹还是对冲风险？
             - **交易员情绪**: 结合社交媒体情绪，判断市场是否过热或恐慌。
@@ -1317,19 +1395,14 @@ class StockAnalyzer:
             - 趋势指标: 50D SMA: {latest['SMA_50']:.2f} | 200D SMA: {latest['SMA_200']:.2f}
             - 动能指标: RSI: {latest['RSI']:.2f} | MACD: {latest['MACD']:.2f} (Signal: {latest['MACD_Signal']:.2f})
             - A股特色指标: KDJ: K={latest['K']:.1f} D={latest['D']:.1f} J={latest['J']:.1f}
+            - 量价指标 (VPA): RVOL: {latest['RVOL']:.2f}x | VWAP: {latest['VWAP']:.2f} | OBV: {latest['OBV']:.0f}
             - 风险与活跃度: ATR(14): {latest['ATR']:.2f} | 换手率: {fund.get('turnover_rate', 'N/A')}
             - 波动率: 30日年化波动率: {latest['Volatility']:.2%}
             - 布林带位置: Upper: {latest['BB_Upper']:.2f} | Lower: {latest['BB_Lower']:.2f} | Close: {latest['Close']:.2f}
 
-            ## 3. 衍生品与情绪 (Derivatives & Sentiment)
-            - 期权 Put/Call Ratio (Volume): {fund['pc_ratio_vol']} (基于最近到期日 {fund['options_expiry']})
-            - 期权 Put/Call Ratio (Open Interest): {fund['pc_ratio_oi']}
-            - 空头流通占比 (Short Float): {fund['short_percent']}
-            {gex_info}
+            {derivatives_input}
             
-            ## 4. 资金流向与聪明钱 (Smart Money Flow)
-            - 异常期权异动 (Unusual Whales - Vol > OI):
-            {flow_info}
+            {smart_money_input}
 
             ## 5. 市场催化剂、管理层指引与交易员情绪 (Catalysts, Guidance & Sentiment)
             - 下次财报日期: {fund.get('next_earnings', 'N/A')} (距离现在 {fund.get('days_to_earnings', 'N/A')} 天)
@@ -1356,6 +1429,14 @@ class StockAnalyzer:
             messages=[{"role": "user", "content": prompt}],
             stream=False
         )
+        usage = response.usage
+        if usage:
+            prompt_tokens = usage.prompt_tokens
+            cache_hit = getattr(usage, 'prompt_cache_hit_tokens', 0)
+            cache_miss = getattr(usage, 'prompt_cache_miss_tokens', 0)
+            hit_rate = (cache_hit / prompt_tokens * 100) if prompt_tokens > 0 else 0
+            print(f"📊 DeepSeek Usage [Stock Report]: Prompt: {prompt_tokens}, Cache Hit: {cache_hit} ({hit_rate:.2f}%), Miss: {cache_miss}")
+
         return response.choices[0].message.content
     @staticmethod
     async def get_ai_analysis(ticker, fund, tech_data, news_data, web_search_data, gex_data, flow_data, macro_data):
@@ -1429,22 +1510,32 @@ async def analyze(ctx, ticker: str):
         # 4. 初始化 Ticker 对象 (复用以提高效率)
         stock_obj = yf.Ticker(ticker)
 
-        # 5. 计算 Gamma Exposure (GEX)
-        await status_msg.edit(content=f"🧮 正在计算 **{ticker}** 的 Gamma Exposure (GEX) 与挤压风险...")
-        gex_data = await loop.run_in_executor(None, lambda: StockAnalyzer.get_gamma_exposure(stock_obj, fund['price']))
-
-        # 6. 扫描期权资金流 (Option Flow)
-        await status_msg.edit(content=f"💸 正在扫描 **{ticker}** 的期权资金流与聪明钱布局...")
-        flow_data = await loop.run_in_executor(None, lambda: StockAnalyzer.get_option_flow(stock_obj, fund['price']))
-
-        # 7. 生成期权 OI 图表
-        oi_chart_buffer = await loop.run_in_executor(None, lambda: StockAnalyzer.get_option_open_interest_chart(stock_obj, fund['price']))
-
-        # 新增: 上传图表到 Supabase 以获取 URL
+        # 判断是否为 A 股
+        is_ashare = ticker.endswith(('.SS', '.SZ', '.BJ'))
+        
+        gex_data = None
+        flow_data = []
+        oi_chart_buffer = None
         oi_chart_url = None
-        if oi_chart_buffer and supabase:
-            oi_chart_filename = f"{ticker}_oi_chart_{int(time.time())}.png"
-            oi_chart_url = await loop.run_in_executor(None, lambda: StockAnalyzer.upload_file_to_supabase(oi_chart_filename, oi_chart_buffer, "image/png"))
+
+        if not is_ashare:
+            # 5. 计算 Gamma Exposure (GEX)
+            await status_msg.edit(content=f"🧮 正在计算 **{ticker}** 的 Gamma Exposure (GEX) 与挤压风险...")
+            gex_data = await loop.run_in_executor(None, lambda: StockAnalyzer.get_gamma_exposure(stock_obj, fund['price']))
+
+            # 6. 扫描期权资金流 (Option Flow)
+            await status_msg.edit(content=f"💸 正在扫描 **{ticker}** 的期权资金流与聪明钱布局...")
+            flow_data = await loop.run_in_executor(None, lambda: StockAnalyzer.get_option_flow(stock_obj, fund['price']))
+
+            # 7. 生成期权 OI 图表
+            oi_chart_buffer = await loop.run_in_executor(None, lambda: StockAnalyzer.get_option_open_interest_chart(stock_obj, fund['price']))
+
+            # 新增: 上传图表到 Supabase 以获取 URL
+            if oi_chart_buffer and supabase:
+                oi_chart_filename = f"{ticker}_oi_chart_{int(time.time())}.png"
+                oi_chart_url = await loop.run_in_executor(None, lambda: StockAnalyzer.upload_file_to_supabase(oi_chart_filename, oi_chart_buffer, "image/png"))
+        else:
+            await status_msg.edit(content=f"📊 A股模式: 正在进行量价分析与历史波动率计算...")
 
         # 8. 获取 AI 报告
         await status_msg.edit(content=f"🤖 DeepSeek R1 (深度思考模式) 正在生成分析报告...")
