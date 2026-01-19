@@ -77,7 +77,11 @@ app = FastAPI()
 # 配置 CORS (允许前端跨域调用)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 允许所有来源，生产环境建议限制为前端域名
+    allow_origins=[
+        "https://stock-analyzer-web-gilt.vercel.app",
+        "http://localhost:3000",
+        "*"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
