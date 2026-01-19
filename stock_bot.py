@@ -563,7 +563,15 @@ class StockAnalyzer:
                 "profit_margins": info.get('profitMargins', 'N/A'),
                 "short_percent": info.get('shortPercentOfFloat', 'N/A'),
                 "business_summary": info.get('longBusinessSummary', '暂无详细业务描述'),
+                "turnover_rate": "N/A"
             }
+            
+            # === 计算换手率 (Turnover Rate) ===
+            # 优先使用 floatShares (流通股), 其次使用 sharesOutstanding (总股本)
+            shares_base = info.get('floatShares') or info.get('sharesOutstanding')
+            avg_vol_10d = info.get('averageVolume10days') or info.get('averageVolume')
+            if shares_base and avg_vol_10d:
+                fundamentals['turnover_rate'] = f"{(avg_vol_10d / shares_base):.2%}"
 
             # === 新增: 财务报表数据 (10-Q/10-K) ===
             financials_data = {}
@@ -690,6 +698,23 @@ class StockAnalyzer:
         df['MACD'] = exp1 - exp2
         df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
 
+        # 5. KDJ (随机指标 - A股常用)
+        # RSV = (Close - Low_9) / (High_9 - Low_9) * 100
+        low_list = df['Low'].rolling(window=9, min_periods=9).min()
+        high_list = df['High'].rolling(window=9, min_periods=9).max()
+        rsv = (df['Close'] - low_list) / (high_list - low_list) * 100
+        df['K'] = rsv.ewm(com=2, adjust=False).mean() # com=2 等同于 alpha=1/3
+        df['D'] = df['K'].ewm(com=2, adjust=False).mean()
+        df['J'] = 3 * df['K'] - 2 * df['D']
+
+        # 6. ATR (平均真实波幅 - 波动率替代指标)
+        high_low = df['High'] - df['Low']
+        high_close = (df['High'] - df['Close'].shift()).abs()
+        low_close = (df['Low'] - df['Close'].shift()).abs()
+        ranges = pd.concat([high_low, high_close, low_close], axis=1)
+        true_range = ranges.max(axis=1)
+        df['ATR'] = true_range.rolling(window=14).mean()
+
         # 5. 波动率 (30日历史波动率)
         df['Log_Ret'] = df['Close'].apply(lambda x: np.log(x)).diff()
         df['Volatility'] = df['Log_Ret'].rolling(window=30).std() * np.sqrt(252) # 年化
@@ -701,13 +726,19 @@ class StockAnalyzer:
         """使用 DuckDuckGo 搜索最新的市场新闻、事件、管理层指引以及社交媒体情绪"""
         results = []
         try:
+            is_ashare = ticker.endswith(('.SS', '.SZ', '.BJ'))
             with DDGS() as ddgs:
                 # 1. 核心催化剂与未来事件 (Event-Driven Focus)
                 query_event = f"{ticker} stock upcoming catalyst events earnings date fda approval product launch"
+                if is_ashare:
+                    query_event = f"{ticker} 股票 重大利好 业绩预告 资产重组 政策驱动"
                 results.extend(list(ddgs.text(query_event, max_results=3)))
 
                 # 2. 隐含波动率与期权异动 (Market Pricing of Events)
                 query_iv = f"{ticker} stock implied volatility rank option flow unusual activity"
+                if is_ashare:
+                    # A股替代搜索: 北向资金、龙虎榜、主力资金
+                    query_iv = f"{ticker} 北向资金流向 龙虎榜数据 主力资金 融资融券"
                 results.extend(list(ddgs.text(query_iv, max_results=2)))
                 
                 # 3. 10-Q/10-K 管理层指引
@@ -1173,6 +1204,8 @@ class StockAnalyzer:
             ## 2. 量化与技术面 (Quant & Technicals)
             - 趋势指标: 50D SMA: {latest['SMA_50']:.2f} | 200D SMA: {latest['SMA_200']:.2f}
             - 动能指标: RSI: {latest['RSI']:.2f} | MACD: {latest['MACD']:.2f} (Signal: {latest['MACD_Signal']:.2f})
+            - A股特色指标: KDJ: K={latest['K']:.1f} D={latest['D']:.1f} J={latest['J']:.1f}
+            - 风险与活跃度: ATR(14): {latest['ATR']:.2f} | 换手率: {fund.get('turnover_rate', 'N/A')}
             - 波动率: 30日年化波动率: {latest['Volatility']:.2%}
             - 布林带位置: Upper: {latest['BB_Upper']:.2f} | Lower: {latest['BB_Lower']:.2f} | Close: {latest['Close']:.2f}
 
