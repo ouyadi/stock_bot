@@ -93,13 +93,6 @@ class ResearchAnalyzer:
         # Role
         你是一名顶尖的金融分析师，你的任务是阅读并总结一份来自投研机构的电子邮件报告。
 
-        # Input Data
-        - **邮件主题**: {subject}
-        - **报告内容**:
-        ---
-        {content[:50000]} 
-        ---
-
         # Task
         请根据报告内容，生成一份精炼、专业的摘要。
         **注意：请忽略报告末尾或文中出现的法律免责声明 (Disclaimer)、风险披露 (Risk Disclosure) 等合规性文本，专注于实质性的投资分析内容。**
@@ -110,6 +103,13 @@ class ResearchAnalyzer:
         4.  **目标价与评级 (Target & Rating)**: 如果报告中明确给出了目标价或投资评级(如买入/持有/卖出)，请明确指出。
 
         请使用中文撰写，语言风格要专业、客观、条理清晰。
+
+        # Input Data
+        - **邮件主题**: {subject}
+        - **报告内容**:
+        ---
+        {content[:50000]} 
+        ---
         """
         try:
             loop = asyncio.get_running_loop()
@@ -500,7 +500,7 @@ class StockAnalyzer:
                 elif ticker.startswith(('4', '8')): ticker = f"{ticker}.BJ" # 北京证券交易所
 
             # 1. 获取数据
-            df, fund, news = StockAnalyzer.get_data(ticker)
+            df, fund, news, macro_data = StockAnalyzer.get_data(ticker)
             if df is None: return None, None, None
 
             # 2. 计算指标
@@ -524,7 +524,7 @@ class StockAnalyzer:
                 oi_chart_url = StockAnalyzer.upload_file_to_supabase(oi_chart_filename, oi_chart_buffer, "image/png")
 
             # 4. AI 生成
-            report = StockAnalyzer._generate_ai_report_sync(ticker, fund, df_tech, news, web_results, gex_data, flow_data)
+            report = StockAnalyzer._generate_ai_report_sync(ticker, fund, df_tech, news, web_results, gex_data, flow_data, macro_data)
 
             # 5. PDF 生成
             pdf_buffer = StockAnalyzer.create_pdf_report(ticker, report, fund, latest, price_change, oi_chart_buffer)
@@ -560,7 +560,7 @@ class StockAnalyzer:
             df = stock.history(period="1y")
             
             if df.empty:
-                return None, None, None
+                return None, None, None, None
 
             info = stock.info
             fundamentals = {
@@ -682,10 +682,37 @@ class StockAnalyzer:
                 fundamentals['options_expiry'] = 'N/A'
             
             news = stock.news
-            return df, fundamentals, news
+            
+            # === 获取宏观市场数据 (Macro Data) ===
+            macro_data = {}
+            try:
+                market_symbol = "^GSPC" # 默认标普500
+                vix_symbol = "^VIX"
+                
+                if ticker_symbol.endswith(('.SS', '.SZ', '.BJ')):
+                    market_symbol = "000001.SS" # 上证指数
+                    vix_symbol = None # A股暂不获取VIX (或使用 510050 等替代，此处简化)
+                
+                market_ticker = yf.Ticker(market_symbol)
+                market_hist = market_ticker.history(period="5d")
+                if not market_hist.empty:
+                    macro_data['market_index'] = market_symbol
+                    macro_data['market_price'] = market_hist['Close'].iloc[-1]
+                    macro_data['market_change'] = (market_hist['Close'].iloc[-1] - market_hist['Close'].iloc[-2]) / market_hist['Close'].iloc[-2]
+                
+                if vix_symbol:
+                    vix_ticker = yf.Ticker(vix_symbol)
+                    vix_hist = vix_ticker.history(period="5d")
+                    if not vix_hist.empty:
+                        macro_data['vix'] = vix_hist['Close'].iloc[-1]
+                        macro_data['vix_change'] = (vix_hist['Close'].iloc[-1] - vix_hist['Close'].iloc[-2]) / vix_hist['Close'].iloc[-2]
+            except Exception as e:
+                print(f"Macro Data Error: {e}")
+
+            return df, fundamentals, news, macro_data
         except Exception as e:
             print(f"Data Error: {e}")
-            return None, None, None
+            return None, None, None, None
 
     @staticmethod
     def calculate_indicators(df):
@@ -777,10 +804,26 @@ class StockAnalyzer:
                     r['title'] = f"[Stocktwits] {r['title']}"
                 results.extend(st_results)
 
+                # 5. 所属板块趋势 (Sector Trends)
+                query_sector = f"{ticker} sector industry trends performance outlook"
+                results.extend(list(ddgs.text(query_sector, max_results=2)))
+
                 return results
         except Exception as e:
             print(f"Web Search Error: {e}")
             return results
+
+    @staticmethod
+    def get_risk_free_rate():
+        """获取当前无风险利率 (基于 10年期美债收益率 ^TNX)"""
+        try:
+            tnx = yf.Ticker("^TNX")
+            hist = tnx.history(period="5d")
+            if not hist.empty:
+                return hist['Close'].iloc[-1] / 100.0
+        except Exception as e:
+            print(f"Risk-Free Rate Error: {e}")
+        return 0.045 # 默认 4.5%
 
     @staticmethod
     def black_scholes_gamma(S, K, T, r, sigma):
@@ -813,7 +856,7 @@ class StockAnalyzer:
             calls = opt.calls.copy()
             puts = opt.puts.copy()
             
-            r = 0.045 # 假设无风险利率 4.5%
+            r = StockAnalyzer.get_risk_free_rate()
             
             # 计算 Gamma
             calls['gamma'] = calls.apply(lambda x: StockAnalyzer.black_scholes_gamma(current_price, x['strike'], T, r, x['impliedVolatility']), axis=1)
@@ -1176,7 +1219,7 @@ class StockAnalyzer:
             return None
 
     @staticmethod
-    def _generate_ai_report_sync(ticker, fund, tech_data, news_data, web_search_data, gex_data, flow_data):
+    def _generate_ai_report_sync(ticker, fund, tech_data, news_data, web_search_data, gex_data, flow_data, macro_data):
         """生成 AI 报告内容的同步核心方法"""
         latest = tech_data.iloc[-1]
         current_date = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -1206,13 +1249,62 @@ class StockAnalyzer:
         if fund['analyst']['recent_ratings']:
             analyst_ratings_str = "\n".join([f"  - {r}" for r in fund['analyst']['recent_ratings']])
 
+        # 格式化宏观数据
+        market_price = macro_data.get('market_price')
+        market_price_str = f"{market_price:.2f}" if isinstance(market_price, (int, float)) else "N/A"
+        market_change = macro_data.get('market_change')
+        market_change_str = f"{market_change:+.2%}" if isinstance(market_change, (int, float)) else "N/A"
+        
+        vix_val = macro_data.get('vix')
+        vix_str = f"{vix_val:.2f}" if isinstance(vix_val, (int, float)) else "N/A"
+        vix_change = macro_data.get('vix_change')
+        vix_change_str = f"{vix_change:+.2%}" if isinstance(vix_change, (int, float)) else "N/A"
+
         # 构建更强大的提示词 (Prompt)
         prompt = f"""
             # Role
             你是一位拥有20年深厚资历的华尔街量化与宏观对冲基金首席投资官 (CIO)。你擅长将自上而下的宏观逻辑（Top-Down）与自下而上的量化因子（Bottom-Up）相结合，挖掘市场尚未完全定价的“预期差”。
 
+            # Analysis Requirements
+            请基于以下数据，生成一份逻辑严密、具备实战指导意义的分析报告。
+            **请直接开始报告内容，不要包含任何自我介绍或开场白。**
+            
+            结构要求如下：
+
+            ### 1.  核心结论与交易驱动 (Executive Summary & Driver)
+            - **交易驱动类型**: [基本面驱动 / 事件驱动 / 量化驱动 / 技术面驱动] (请根据分析判定主导因素)
+            - **投资评级**: (强力买入 / 买入 / 增持 / 中性 / 减持 / 卖出)
+            - **操作时间框架**: (例如: 短线波段 / 中期趋势 / 长线配置)
+            - **AI 置信度**: (例如: 极高置信度 >90% / 高置信度 75-90% / 中等置信度 60-75% / 低置信度 <60%)
+            - **操作计划**:
+              - 入场区间 (Entry): [具体价格]
+              - 目标止盈 (TP): [具体价格]
+              - 硬性止损 (SL): [具体价格]
+            - **核心逻辑摘要**: 一句话概括为何做此交易。
+
+            ### 2. 🏛️ 宏观叙事与基本面 (Macro & Fundamentals)
+            - **宏观环境**: 结合大盘走势 ({macro_data.get('market_index', 'Market')}) 和 VIX 恐慌指数，判断当前市场是 Risk-On 还是 Risk-Off。
+            - **板块趋势**: 分析所属板块 ({fund['sector']}) 的整体表现。
+            - **AI/FSD/增长故事**: 结合业务指引和行业趋势，分析核心增长逻辑。
+            - **估值逻辑**: P/E 是否合理？结合 PEG 和历史分位判断。
+
+            ### 3. 🔬 微观筹码与期权博弈 (Micro & Chips)
+            - **Gamma Squeeze 风险**: 分析 Call Wall/Put Wall 位置，判断是否存在逼空或杀跌动能。
+            - **资金流向 (Smart Money)**: 解读期权异动 (Option Flow)，主力是在布局反弹还是对冲风险？
+            - **交易员情绪**: 结合社交媒体情绪，判断市场是否过热或恐慌。
+
+            ### 4. 📈 技术面共振 (Technicals)
+            - **关键均线**: 50D/200D SMA 的支撑与阻力。
+            - **指标信号**: RSI 是否超买/超卖？MACD 是否背离？
+            
+            请使用专业、简洁、富有洞察力的语言输出。
+
             # Input Data Panel
             - **当前分析日期**: {current_date}
+
+            ## 0. 宏观市场环境 (Macro Context)
+            - 大盘指数 ({macro_data.get('market_index', 'N/A')}): {market_price_str} (Change: {market_change_str})
+            - 市场恐慌指数 (VIX): {vix_str} (Change: {vix_change_str})
 
             ## 1. 标的基本面与质量 (Quality & Value)
             - 标的: {ticker} ({fund['name']}) | 行业: {fund['sector']}
@@ -1239,7 +1331,6 @@ class StockAnalyzer:
             - 异常期权异动 (Unusual Whales - Vol > OI):
             {flow_info}
 
-            ## 4. 市场催化剂、管理层指引与交易员情绪 (Catalysts, Guidance & Sentiment)
             ## 5. 市场催化剂、管理层指引与交易员情绪 (Catalysts, Guidance & Sentiment)
             - 下次财报日期: {fund.get('next_earnings', 'N/A')} (距离现在 {fund.get('days_to_earnings', 'N/A')} 天)
             - 实时网络搜索 (含未来事件、IV分析、X/Twitter讨论):
@@ -1247,51 +1338,17 @@ class StockAnalyzer:
             - 交易所新闻 (Exchange News): 
             {news_headlines if news_headlines else "- 暂无交易所新闻"}
 
-            ## 5. 财务报表透视 (Financials - Latest Quarter)
             ## 6. 财务报表透视 (Financials - Latest Quarter)
             - 报告日期: {fund['financials'].get('date', 'N/A')}
             - 总营收: {fund['financials'].get('revenue', 'N/A')} | 净利润: {fund['financials'].get('net_income', 'N/A')}
             - 毛利润: {fund['financials'].get('gross_profit', 'N/A')} | 经营现金流: {fund['financials'].get('op_cashflow', 'N/A')}
             - 资产负债: 现金储备 {fund['financials'].get('total_cash', 'N/A')} vs 总债务 {fund['financials'].get('total_debt', 'N/A')}
 
-            ## 6. 华尔街分析师共识 (Analyst Consensus)
             ## 7. 华尔街分析师共识 (Analyst Consensus)
             - 综合评级: {fund['analyst']['recommendation']} (基于 {fund['analyst']['num_analysts']} 位分析师)
             - 目标价: Mean: {fund['analyst']['target_mean']} | High: {fund['analyst']['target_high']} | Low: {fund['analyst']['target_low']}
             - 近期机构评级变动:
             {analyst_ratings_str}
-
-            # Analysis Requirements
-            请基于以上数据，生成一份逻辑严密、具备实战指导意义的分析报告。
-            **请直接开始报告内容，不要包含任何自我介绍或开场白。**
-            
-            结构要求如下：
-
-            ### 1.  核心结论与交易驱动 (Executive Summary & Driver)
-            - **交易驱动类型**: [基本面驱动 / 事件驱动 / 量化驱动 / 技术面驱动] (请根据分析判定主导因素)
-            - **投资评级**: (强力买入 / 买入 / 增持 / 中性 / 减持 / 卖出)
-            - **操作时间框架**: (例如: 短线波段 / 中期趋势 / 长线配置)
-            - **AI 置信度**: (例如: 极高置信度 >90% / 高置信度 75-90% / 中等置信度 60-75% / 低置信度 <60%)
-            - **操作计划**:
-              - 入场区间 (Entry): [具体价格]
-              - 目标止盈 (TP): [具体价格]
-              - 硬性止损 (SL): [具体价格]
-            - **核心逻辑摘要**: 一句话概括为何做此交易。
-
-            ### 2. 🏛️ 宏观叙事与基本面 (Macro & Fundamentals)
-            - **AI/FSD/增长故事**: 结合业务指引和行业趋势，分析核心增长逻辑。
-            - **估值逻辑**: P/E 是否合理？结合 PEG 和历史分位判断。
-
-            ### 3. 🔬 微观筹码与期权博弈 (Micro & Chips)
-            - **Gamma Squeeze 风险**: 分析 Call Wall/Put Wall 位置，判断是否存在逼空或杀跌动能。
-            - **资金流向 (Smart Money)**: 解读期权异动 (Option Flow)，主力是在布局反弹还是对冲风险？
-            - **交易员情绪**: 结合社交媒体情绪，判断市场是否过热或恐慌。
-
-            ### 4. 📈 技术面共振 (Technicals)
-            - **关键均线**: 50D/200D SMA 的支撑与阻力。
-            - **指标信号**: RSI 是否超买/超卖？MACD 是否背离？
-            
-            请使用专业、简洁、富有洞察力的语言输出。
             """
         
         response = client.chat.completions.create(
@@ -1301,14 +1358,14 @@ class StockAnalyzer:
         )
         return response.choices[0].message.content
     @staticmethod
-    async def get_ai_analysis(ticker, fund, tech_data, news_data, web_search_data, gex_data, flow_data):
+    async def get_ai_analysis(ticker, fund, tech_data, news_data, web_search_data, gex_data, flow_data, macro_data):
         """调用 LLM 生成更深度的自然语言报告 (Async Wrapper)"""
         try:
             loop = asyncio.get_running_loop()
             # 复用同步生成方法
             return await loop.run_in_executor(
                 None, 
-                lambda: StockAnalyzer._generate_ai_report_sync(ticker, fund, tech_data, news_data, web_search_data, gex_data, flow_data)
+                lambda: StockAnalyzer._generate_ai_report_sync(ticker, fund, tech_data, news_data, web_search_data, gex_data, flow_data, macro_data)
             )
         except Exception as e:
             return f"AI 分析生成失败: {str(e)}"
@@ -1350,7 +1407,7 @@ async def analyze(ctx, ticker: str):
     try:
         # 1. 获取数据
         await status_msg.edit(content=f"🧠 正在获取 **{ticker}** 的基本面、新闻和历史数据...")
-        df, fund, news = StockAnalyzer.get_data(ticker)
+        df, fund, news, macro_data = StockAnalyzer.get_data(ticker)
         
         if df is None:
             await status_msg.edit(content=f"❌ 找不到股票代码 **{ticker}**，请检查拼写或重试。")
@@ -1391,7 +1448,7 @@ async def analyze(ctx, ticker: str):
 
         # 8. 获取 AI 报告
         await status_msg.edit(content=f"🤖 DeepSeek R1 (深度思考模式) 正在生成分析报告...")
-        report = await StockAnalyzer.get_ai_analysis(ticker, fund, df_tech, news, web_results, gex_data, flow_data)
+        report = await StockAnalyzer.get_ai_analysis(ticker, fund, df_tech, news, web_results, gex_data, flow_data, macro_data)
 
         # 9. 构建 Embed 消息
         embed = discord.Embed(
