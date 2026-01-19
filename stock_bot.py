@@ -1,3 +1,6 @@
+import warnings
+# 忽略 duckduckgo_search 的包更名警告
+warnings.filterwarnings("ignore", category=RuntimeWarning, message="This package.*duckduckgo_search.*")
 import discord
 from discord.ext import commands
 import yfinance as yf
@@ -896,7 +899,7 @@ class StockAnalyzer:
             ax.set_xticks(indices)
             ax.set_xticklabels([str(int(s)) for s in all_strikes], rotation=45, fontsize=7)
             ax.set_title(f'Open Interest Distribution (Expiry: {expiry})', fontsize=10)
-            ax.legend(fontsize=8)
+            ax.legend(fontsize=8, loc='upper right')
             ax.grid(True, alpha=0.3)
             
             # 标记当前价格
